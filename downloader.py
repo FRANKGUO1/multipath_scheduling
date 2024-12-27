@@ -305,90 +305,7 @@ class Downloader:
                     break
         return min_rtt_path_id
     
-
-    def get_state_features(self):
-        pass
-
-
-    def qlearning_initial_explore(self):
-        if not hasattr(self, 'q_table'):
-            self.q_table = numpy.zeros((
-                self.n_throughput_levels,
-                self.n_rtt_levels,
-                self.n_buffer_levels,
-                self.n_bitrate_levels,
-                nb_paths * get_nb_bitrates()
-        ))
-            
-        seg_no = 1
-        last_state = None
-        last_action = None
-
-         # 对每个路径进行探索
-        for path_id in range(1, nb_paths + 1):
-            # 遍历所有可能的分辨率和码率组合
-            for r, m in reversed(bitrate_mapping.items()):
-                for k, v in reversed(m.items()):
-                    # 获取当前状态
-                    current_state = self.get_state_features()
-
-                    action = (path_id - 1) * get_nb_bitrates() + k
-                               
-                    # 创建下载任务
-                    task = self.url[r][k][seg_no]
-                    task.update({
-                        "seg_no": seg_no,
-                        "resolution": r,
-                        "bitrate": v,
-                        "path_id": path_id,
-                        "eos": 0,
-                        "initial_explore": 1,
-                        "action": action,
-                        "state": current_state  # 保存状态以便后续更新Q值
-                    })
-
-                                    
-                    self.scheduled[seg_no] = 1
-                    
-                    # 将任务放入下载队列
-                    self.download_queue[path_id - 1].put(task)
-                    
-                    # 等待任务完成
-                    self.download_queue[path_id - 1].join()
-                    
-                    # 如果有上一个状态和动作，更新Q值
-                    if last_state is not None:
-                        # 计算奖励（基于下载完成后的实际效果）
-                        reward = self.calculate_reward(
-                            last_state,
-                            last_action,
-                            current_state
-                        )
-                        
-                        # 更新Q值
-                        self.update_q_value(
-                            last_state,
-                            last_action,
-                            reward,
-                            current_state
-                        )
-                    
-                    # 保存当前状态和动作，用于下一次更新
-                    last_state = current_state
-                    last_action = action
-                    
-                    # 更新片段编号
-                    seg_no += 1
-        print(f"{bcolors.RED}Initial exploration completed, Q-table initialized{bcolors.ENDC}")
-        
-        # 等待所有任务完成
-        for i in range(nb_paths):
-            self.download_queue[i].join()
-    
-        for h in history:
-            print(h)
-            
-            
+      
     def initial_explore(self):
         # nb_paths为2
         seg_no = 1
@@ -551,8 +468,114 @@ class Downloader:
             i += 1
 
 
-    def q_learning_scheduling(self):
+    def get_state_features(self):
+        """
+        获取当前环境状态特征
+        history[len(history) - 1]["rtt"]
+        """
+        state = {
+        # 网络状态 目前获取最新调度的路径信息
+        'path_id': history[len(history) - 1]["path_id"],
+        'throughput': history[len(history) - 1]["throughput"],
+        'rtt': history[len(history) - 1]["rtt"],
+        
+        # 播放状态 - 关键的
+        'playback_buffer_ratio': history[len(history) - 1]["playback_buffer_ratio"],  # 缓冲区状态直接影响rebuffering
+        'current_resolution': history[len(history) - 1]["resolution"],  # 当前分辨率，用于保持画质稳定性
+        
+        # 可选的补充状态
+        'rebuffering_ratio': history[len(history) - 1]["rebuffering_ratio"],  # 重缓冲比例，表示播放过程中缓冲的时间占比
+        }
+        
+        
+    
+
+    def calculate_reward(self, last_state, last_action, current_state):
+        """
+        计算奖励
+        """
         pass
+        
+
+    def qlearning_initial_explore(self):
+        if not hasattr(self, 'q_table'):
+            self.q_table = numpy.zeros((
+                self.n_throughput_levels,
+                self.n_rtt_levels,
+                self.n_buffer_levels,
+                self.n_bitrate_levels,
+                nb_paths * get_nb_bitrates()
+        ))
+            
+        seg_no = 1
+        last_state = None
+        last_action = None
+
+        # 对每个路径进行探索
+        for path_id in range(1, nb_paths + 1):
+            # 遍历所有可能的分辨率和码率组合
+            for r, m in reversed(bitrate_mapping.items()):
+                for k, v in reversed(m.items()):
+                    # 获取当前状态
+                    current_state = self.get_state_features()
+
+                    action = (path_id - 1) * get_nb_bitrates() + k
+                            
+                    # 创建下载任务
+                    task = self.url[r][k][seg_no]
+                    task.update({
+                        "seg_no": seg_no,
+                        "resolution": r,
+                        "bitrate": v,
+                        "path_id": path_id,
+                        "eos": 0,
+                        "initial_explore": 1,
+                        "action": action,
+                        "state": current_state  # 保存状态以便后续更新Q值
+                    })
+
+                                    
+                    self.scheduled[seg_no] = 1
+                    self.download_queue[path_id - 1].put(task)
+                    self.download_queue[path_id - 1].join()
+                    
+                    # 如果有上一个状态和动作，更新Q值
+                    if last_state is not None:
+                        # 计算奖励（基于下载完成后的实际效果）
+                        reward = self.calculate_reward(
+                            last_state,
+                            last_action,
+                            current_state
+                        )
+                        
+                        # 更新Q值
+                        self.update_q_value(
+                            last_state,
+                            last_action,
+                            reward,
+                            current_state
+                        )
+                    
+                    # 保存当前状态和动作，用于下一次更新
+                    last_state = current_state
+                    last_action = action
+                    
+                    # 更新片段编号
+                    seg_no += 1
+        print(f"{bcolors.RED}Initial exploration completed, Q-table initialized{bcolors.ENDC}")
+        
+        # 等待所有任务完成
+        for i in range(nb_paths):
+            self.download_queue[i].join()
+    
+        for h in history:
+            print(h)
+
+    
+    def q_learning_scheduling(self):
+        self.qlearning_initial_explore()
+        
+
 
     def contextual_bandit_scheduling(self):
         def get_history_arm():
