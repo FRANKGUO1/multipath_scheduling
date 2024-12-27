@@ -1,0 +1,4 @@
+able_set_default ipv4_lpm drop
+table_add MyIngress.ipv4_lpm ipv4_forward 10.0.1.2/24 => e8:61:1f:37:b6:83 1
+table_add MyIngress.ipv4_lpm ipv4_forward 10.0.2.2/24 => a0:36:9f:08:d1:2b 2
+table_add MyIngress.ipv4_lpm ipv4_forward 10.0.3.2/24 => e8:61:1f:37:b5:8b 3
