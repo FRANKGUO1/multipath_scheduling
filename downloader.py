@@ -9,14 +9,15 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from mabwiser.mab import MAB, LearningPolicy, NeighborhoodPolicy
 from collections import defaultdict
+import threading
 
 from mpd import parse_mpd
 from bitrate import get_initial_bitrate, get_bitrate_level, get_max_bitrate, get_nb_bitrates, get_resolution
 from bitrate import bitrate_mapping, build_arms
 from config import playback_buffer_map, max_playback_buffer_size, rebuffering_ratio, history
-from config import nb_paths, playback_buffer_frame_ratio, DEBUG_SEGMENTS
+from config import nb_paths, playback_buffer_frame_ratio, DEBUG_SEGMENTS, target_ip, network_interface1, network_interface2
 import config
-from get_delay_throughput
+from get_delay_throughput import monitor_path
 
 default_mpd_url = "../mpd/stream.mpd"  # 提供mpd文件的地址
 default_host = "10.0.1.2"
@@ -29,10 +30,21 @@ DEBUG = True
 
 
 # 这里是通过将path_id映射成为网卡，通过http3请求发送出去。
+# 这里和mininet的有冲突
 if_name_mapping = {
     1: "h2-eth0",
     2: "h2-eth1",
     -1: "h2-eth0",
+}
+
+interface_mapping = {
+    network_interface1: 1, 
+    network_interface2: 2
+}
+
+interface_data = {
+    network_interface1: {"latency": [], "throughput": []},
+    network_interface2: {"latency": [], "throughput": []},
 }
 
 
@@ -169,6 +181,8 @@ class Downloader:
         """
         if self.scheduler == "contextual_bandit":
             scheduling_process = Process(target=self.contextual_bandit_scheduling)
+        elif self.scheduler == "q_learning":
+            scheduling_process = Process(target=self.q_learning_scheduling)
         elif self.scheduler == "roundrobin":
             scheduling_process = Process(target=self.roundrobin_scheduling)
         elif self.scheduler == "minrtt":
@@ -211,6 +225,10 @@ class Downloader:
                 _playback_buffer_ratio_before = playback_buffer_frame_ratio.value
                 _rebuffering_ratio_before = rebuffering_ratio.value
 
+                # 在请求之前获取路径的状态信息
+                path1_statistics = monitor_path(target_ip, network_interface1)
+                path2_statistics = monitor_path(target_ip, network_interface2)
+
                 # 这一部分就是利用libplayer库，向quic服务器发起请求，具体得看client.h，libplayer.so就是链接这个文件
                 with stdout_redirected(): # 使得下载过程C库的输出直接丢弃
                     self.libplayer.download_segment(c_str(self.host), # 服务器的主机地址 
@@ -229,39 +247,30 @@ class Downloader:
                 _rebuffering_ratio = rebuffering_ratio.value
                 _bitrate_level_ratio = task["bitrate"] * 1.0 / get_max_bitrate()  # 用当前的比特率除以最大的比特率就是目前的比特率比例，越接近1越好。
                 
-                rebuffering_diff = _rebuffering_ratio - _rebuffering_ratio_before
-                
-                if len(resolution_history) >= 2:
-                    resolution_diff = resolution_history[-1] - resolution_history[-2]                 
-                else:
-                    resolution_diff = 0
-
-                # 根据条件选择对应的比特率值
-                resolution_reward = _bitrate_level_ratio if resolution_diff >= 0 else -_bitrate_level_ratio
-                rebuffering_reward = -_bitrate_level_ratio if rebuffering_diff > 0 else _bitrate_level_ratio
-
 
                 # 保存历史数据,这里来保存以往的数据
                 history.append({
+                    # q-learning添加部分
+                    "path1_throughput": path1_statistics["throughput"],
+                    "path2_throughput": path2_statistics["throughput"],
+                    "path1_rtt": path1_statistics["rtt"],
+                    "path2_rtt": path2_statistics["rtt"],
+
+                    # mab
                     "throughput": stat.throughput,
                     "rtt": stat.one_way_delay_avg / 1000.0 * 2,
-                    "action": task["action"],
-
-                    # "arm": task["arm"],
+                    "arm": task["arm"],
                     "seg_no": task["seg_no"],
                     "resolution": task["resolution"],
                     "bitrate": task["bitrate"],
                     "bitrate_ratio": _bitrate_level_ratio,
-                    # "throughput": stat.throughput,
-                    # "rtt": stat.one_way_delay_avg / 1000.0 * 2,
                     "playback_buffer_ratio": _playback_buffer_ratio_before,
                     "rebuffering_ratio": _rebuffering_ratio_before,
                     "playback_buffer_ratio_after": _playback_buffer_ratio,
                     "rebuffering_ratio_after": _rebuffering_ratio,
                     "path_id": task["path_id"],
                     "initial_explore": task["initial_explore"],
-                    # "reward": -1 * _bitrate_level_ratio if _rebuffering_ratio - _rebuffering_ratio_before > 0 else _bitrate_level_ratio, 
-                    "reward": self.alpha * resolution_reward + self.beta * rebuffering_reward,           
+                    "reward": -1 * _bitrate_level_ratio if _rebuffering_ratio - _rebuffering_ratio_before > 0 else _bitrate_level_ratio,      
                 })
 
                 # 在探索阶段完成后，利用历史信息来进一步优化模型
@@ -360,8 +369,6 @@ class Downloader:
 
         for h in history:
             print(h) # 这里history是可以进程共享的
-
-
     """
     get the highest resolution, bitrate and bitrate_level to the given bandwidth
     :return: resolution, bitrate, bitrate_level
@@ -481,17 +488,18 @@ class Downloader:
         history[len(history) - 1]["rtt"]
         """
         state = {
-        # 网络状态 目前获取最新调度的路径信息
-        'path_id': history[len(history) - 1]["path_id"],
-        'throughput': history[len(history) - 1]["throughput"],
-        'rtt': history[len(history) - 1]["rtt"],
-        
-        # 播放状态 - 关键的
-        'playback_buffer_ratio': history[len(history) - 1]["playback_buffer_ratio"],  # 缓冲区状态直接影响rebuffering
-        'current_resolution': history[len(history) - 1]["resolution"],  # 当前分辨率，用于保持画质稳定性
-        
-        # 可选的补充状态
-        'rebuffering_ratio': history[len(history) - 1]["rebuffering_ratio"],  # 重缓冲比例，表示播放过程中缓冲的时间占比
+            # 网络状态 - 必需的
+            'path1_throughput': get_history_mean_throughput_on_path(1),
+            'path2_throughput': get_history_mean_throughput_on_path(2),
+            'path1_rtt': get_history_mean_rtt_on_path(1),
+            'path2_rtt': get_history_mean_rtt_on_path(2),
+            
+            # 播放状态 - 关键的
+            'buffer_ratio': get_latest_playback_buffer_ratio(),  # 缓冲区状态直接影响rebuffering
+            'current_resolution': get_latest_resolution(),  # 当前分辨率，用于保持画质稳定性
+            
+            # 可选的补充状态
+            'rebuffering_ratio': get_latest_rebuffering_ratio(),  # 反映了系统的稳定性
         }
         
         
@@ -830,3 +838,17 @@ class Downloader:
                         f"resolution: %d, bitrate_level: %d{bcolors.ENDC}" % (
                             seg_no, raw_prediction, prediction, path_id, resolution,
                             bitrate_level))
+
+
+# if __name__ == "__main__":
+    # path1_result = monitor_path(target_ip, network_interface1)
+    # path2_result = monitor_path(target_ip, network_interface2)
+
+    # print(f"RTT (ms): {path1_result['rtt']}")
+    # print(f"吞吐量 (KB/s): {path1_result['throughput']}")
+
+    # print(f"RTT (ms): {path2_result['rtt']}")
+    # print(f"吞吐量 (KB/s): {path2_result['throughput']}")
+
+
+

@@ -24,6 +24,11 @@ lints_alpha = 0.1
 egreedy_epsilon = 0.1
 DEBUG_SEGMENTS = 200
 
+# 定义目标IP地址（两条路径）
+target_ip = "10.0.1.2"
+network_interface1 = "h2-eth0"  
+network_interface2 = "h2-eth1" 
+
 
 def init(_exp_id: str, _algorithm: str, _linucb_alpha: float, _lints_alpha: float, _egreedy_epsilon: float, _DEBUG_SEGMENTS: int):
     global exp_id, algorithm, linucb_alpha, lints_alpha, egreedy_epsilon, DEBUG_SEGMENTS
