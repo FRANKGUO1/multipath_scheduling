@@ -16,6 +16,7 @@ from bitrate import bitrate_mapping, build_arms
 from config import playback_buffer_map, max_playback_buffer_size, rebuffering_ratio, history
 from config import nb_paths, playback_buffer_frame_ratio, DEBUG_SEGMENTS
 import config
+from get_delay_throughput
 
 default_mpd_url = "../mpd/stream.mpd"  # 提供mpd文件的地址
 default_host = "10.0.1.2"
@@ -240,15 +241,19 @@ class Downloader:
                 rebuffering_reward = -_bitrate_level_ratio if rebuffering_diff > 0 else _bitrate_level_ratio
 
 
-                # 保存历史数据
+                # 保存历史数据,这里来保存以往的数据
                 history.append({
-                    "arm": task["arm"],
+                    "throughput": stat.throughput,
+                    "rtt": stat.one_way_delay_avg / 1000.0 * 2,
+                    "action": task["action"],
+
+                    # "arm": task["arm"],
                     "seg_no": task["seg_no"],
                     "resolution": task["resolution"],
                     "bitrate": task["bitrate"],
                     "bitrate_ratio": _bitrate_level_ratio,
-                    "throughput": stat.throughput,
-                    "rtt": stat.one_way_delay_avg / 1000.0 * 2,
+                    # "throughput": stat.throughput,
+                    # "rtt": stat.one_way_delay_avg / 1000.0 * 2,
                     "playback_buffer_ratio": _playback_buffer_ratio_before,
                     "rebuffering_ratio": _rebuffering_ratio_before,
                     "playback_buffer_ratio_after": _playback_buffer_ratio,
@@ -269,6 +274,7 @@ class Downloader:
 
                 if DEBUG_WAIT:
                     time.sleep(DEBUG_WAIT_SECONDS)
+
 
     def sequential_scheduling(self):
         for i in range(1, len(self.url[self.init_resolution][self.init_bitrate_level])):
@@ -340,7 +346,7 @@ class Downloader:
                     task["path_id"] = path_id
                     task["eos"] = 0 # 等于1时表示视频段播放完，为0表示未播放完
                     task["initial_explore"] = 1
-                    task["arm"] = (path_id - 1) * get_nb_bitrates() + k # 记录每一个比特率等级的标识，路径1则是1-3，路径2则是6+（1-3）
+                    task["action"] = (path_id - 1) * get_nb_bitrates() + k # 记录每一个比特率等级的标识，路径1则是1-3，路径2则是6+（1-3）
                     self.scheduled[seg_no] = 1 # 表示分辨率和比特率等级下的片段已经调度
                     self.download_queue[path_id - 1].put(task) # 这里使用path_id作为索引，0和1索引，表示两条路径的下载任务
                     self.download_queue[path_id - 1].join() # 等待多线程任务结束
@@ -354,6 +360,7 @@ class Downloader:
 
         for h in history:
             print(h) # 这里history是可以进程共享的
+
 
     """
     get the highest resolution, bitrate and bitrate_level to the given bandwidth
@@ -488,8 +495,6 @@ class Downloader:
         }
         
         
-    
-
     def calculate_reward(self, last_state, last_action, current_state):
         """
         计算奖励

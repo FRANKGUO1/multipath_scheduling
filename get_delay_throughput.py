@@ -53,7 +53,7 @@ def monitor_path(target_ip, network_interface):
         rx_rate = get_throughput(network_interface)
         
         # 输出结果
-        print(f"路径{interface_mapping[network_interface]} 时延: {latency} ms, 接收吞吐量: {rx_rate} KB/s")
+        # print(f"路径{interface_mapping[network_interface]} 时延: {latency} ms, 接收吞吐量: {rx_rate} KB/s")
         # 每隔 1 秒获取一次数据
         time.sleep(1)
 
