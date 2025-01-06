@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from mabwiser.mab import MAB, LearningPolicy, NeighborhoodPolicy
 from collections import defaultdict
 import threading
+from typing import Optional
 
 from mpd import parse_mpd
 from bitrate import get_initial_bitrate, get_bitrate_level, get_max_bitrate, get_nb_bitrates, get_resolution
@@ -96,6 +97,85 @@ class DownloadStat(Structure):
     ]
 
 
+class SimpleStateDiscretizer:
+    def __init__(self):
+        # 为每条路径定义RTT和throughput的固定范围
+        # RTT范围: <10, 10-50, 50-100, >100 (4个区间)
+        self.rtt_ranges = [10, 50, 100]
+        
+        # Throughput范围: <5, 5-10, 10-20, 20-30, >30 (5个区间)
+        self.throughput_ranges = [5, 10, 20, 30]
+        
+        # 计算单条路径的状态数
+        self.rtt_states = len(self.rtt_ranges) + 1  # 4个状态
+        self.throughput_states = len(self.throughput_ranges) + 1  # 5个状态
+        
+        # 单条路径的状态数 = RTT状态数 × Throughput状态数 = 4 × 5 = 20
+        self.single_path_states = self.rtt_states * self.throughput_states
+    
+    def discretize_path_state(self, rtt, throughput):
+        """
+        将单条路径的RTT和throughput转换为离散状态
+        
+        参数:
+        rtt: float, RTT值(ms)
+        throughput: float, 吞吐量值(Mbps)
+        
+        返回:
+        tuple: (rtt_state, throughput_state) 离散化后的状态编号
+        """
+        rtt_state = numpy.digitize(rtt, self.rtt_ranges)
+        throughput_state = numpy.digitize(throughput, self.throughput_ranges)
+        return (rtt_state, throughput_state)
+    
+    def get_path_state_number(self, rtt, throughput):
+        """
+        将单条路径的RTT和throughput转换为单个状态编号
+        
+        参数:
+        rtt: float, RTT值(ms)
+        throughput: float, 吞吐量值(Mbps)
+        
+        返回:
+        int: 该路径的状态编号（从0开始）
+        """
+        rtt_state, throughput_state = self.discretize_path_state(rtt, throughput)
+        return rtt_state * self.throughput_states + throughput_state
+    
+    def get_multi_path_state(self, path1_rtt, path1_throughput, path2_rtt, path2_throughput):
+        """
+        将两条路径的状态组合为一个总体状态编号
+        
+        参数:
+        path1_rtt: float, 路径1的RTT值(ms)
+        path1_throughput: float, 路径1的吞吐量值(Mbps)
+        path2_rtt: float, 路径2的RTT值(ms)
+        path2_throughput: float, 路径2的吞吐量值(Mbps)
+        
+        返回:
+        int: 组合后的状态编号（从0开始）
+        """
+        # 获取两条路径各自的状态编号
+        path1_state = self.get_path_state_number(path1_rtt, path1_throughput)
+        path2_state = self.get_path_state_number(path2_rtt, path2_throughput)
+        
+        # 将两个路径的状态组合成一个总状态
+        # path1_state的范围是0到19，path2_state也是0到19
+        # 总状态 = path1_state * 20 + path2_state
+        return path1_state * self.single_path_states + path2_state
+    
+    def get_state_space_size(self):
+        """
+        返回总的状态空间大小
+        
+        返回:
+        int: 状态空间的总大小 (400 = 20 × 20)
+        """
+        # 总状态数 = 单条路径的状态数 × 单条路径的状态数
+        # = (4 × 5) × (4 × 5) = 20 × 20 = 400
+        return self.single_path_states * self.single_path_states
+
+
 class Downloader:
     # define an init function with optional parameters and type hints
 
@@ -111,14 +191,29 @@ class Downloader:
                  mpd_url: str = default_mpd_url,
                  scheduler: str = "contextual_bandit",
                  algorithm: str = "",
+                 discretizer: Optional[SimpleStateDiscretizer] = None,
                  ):
         self.host = host
         self.port = port
         self.manager = Manager()
         self.scheduler = scheduler
         self.algorithm = algorithm
- 
-        self.Q_table = {}  # 初始化Q-table
+
+        if discretizer is None:
+            discretizer = SimpleStateDiscretizer()
+    
+        self.discretizer = discretizer
+        self.num_actions = nb_paths * get_nb_bitrates()
+    
+        # qtable暂时在[0,1)之间随机初始化
+        self.q_table = numpy.random.uniform(0, 1, (
+            self.discretizer.get_state_space_size() * self.discretizer.get_state_space_size(),  # 路径的状态空间
+            self.num_actions # 动作组合数
+        ))
+
+        self.learning_rate = 0.1
+        self.discount_factor = 0.9
+        self.epsilon = 0.1  # ε-贪婪策略的参数
 
         self.alpha = 0.7
         self.beta = 0.3
@@ -204,10 +299,6 @@ class Downloader:
             process_list[path_id].join()
 
 
-    def get_reward(self, resolution_history, rebuffering_ratio, rebuffering_ratio_before, bitrate_level_ratio):
-        clarity_score = bitrate_level_ratio if  resolution_history[-1] - resolution_history[-2] > 0 else -1 * bitrate_level_ratio
-
-
     # 这个函数用于向服务器发请求，下载相关视频片段
     def download(self, path_id: int):
         resolution_history = []
@@ -270,6 +361,7 @@ class Downloader:
                     "rebuffering_ratio_after": _rebuffering_ratio,
                     "path_id": task["path_id"],
                     "initial_explore": task["initial_explore"],
+                    # 如果重缓存率下降，增大码率水平，若上升，怎减小码率水平
                     "reward": -1 * _bitrate_level_ratio if _rebuffering_ratio - _rebuffering_ratio_before > 0 else _bitrate_level_ratio,      
                 })
 
@@ -362,7 +454,7 @@ class Downloader:
                     seg_no += 1 # 处理下一个片段
 
         print(f"{bcolors.RED}all initial explore tasks are put into queue {bcolors.ENDC}")
-        # 表名所有初始化探索任务被放进队列中了
+        # 表明所有初始化探索任务被放进队列中了
 
         for i in range(nb_paths):
             self.download_queue[i].join()  # 确保任务全部完成
@@ -482,44 +574,7 @@ class Downloader:
             i += 1
 
 
-    def get_state_features(self):
-        """
-        获取当前环境状态特征
-        history[len(history) - 1]["rtt"]
-        """
-        state = {
-            # 网络状态 - 必需的
-            'path1_throughput': get_history_mean_throughput_on_path(1),
-            'path2_throughput': get_history_mean_throughput_on_path(2),
-            'path1_rtt': get_history_mean_rtt_on_path(1),
-            'path2_rtt': get_history_mean_rtt_on_path(2),
-            
-            # 播放状态 - 关键的
-            'buffer_ratio': get_latest_playback_buffer_ratio(),  # 缓冲区状态直接影响rebuffering
-            'current_resolution': get_latest_resolution(),  # 当前分辨率，用于保持画质稳定性
-            
-            # 可选的补充状态
-            'rebuffering_ratio': get_latest_rebuffering_ratio(),  # 反映了系统的稳定性
-        }
-        
-        
-    def calculate_reward(self, last_state, last_action, current_state):
-        """
-        计算奖励
-        """
-        pass
-        
-
     def qlearning_initial_explore(self):
-        if not hasattr(self, 'q_table'):
-            self.q_table = numpy.zeros((
-                self.n_throughput_levels,
-                self.n_rtt_levels,
-                self.n_buffer_levels,
-                self.n_bitrate_levels,
-                nb_paths * get_nb_bitrates()
-        ))
-            
         seg_no = 1
         last_state = None
         last_action = None
@@ -530,7 +585,7 @@ class Downloader:
             for r, m in reversed(bitrate_mapping.items()):
                 for k, v in reversed(m.items()):
                     # 获取当前状态
-                    current_state = self.get_state_features()
+                    # current_state = self.get_state_features()
 
                     action = (path_id - 1) * get_nb_bitrates() + k
                             
@@ -586,7 +641,67 @@ class Downloader:
 
     
     def q_learning_scheduling(self):
-        self.qlearning_initial_explore()
+        def calculate_reward(quality, rebuffering_ratio):
+            """
+            计算奖励值
+            
+            参数:
+            quality: 视频质量评分
+            rebuffering_ratio: 重缓冲比率
+            """
+            # 可以根据实际需求调整权重
+            quality_weight = 1.0
+            rebuffer_weight = -2.0
+            
+            return quality_weight * quality + rebuffer_weight * rebuffering_ratio
+        
+
+        def update(self, state, action, reward, next_state):
+            """
+            更新Q表
+            
+            参数:
+            state: 当前状态
+            action: 执行的动作 (path, bitrate)
+            reward: 获得的奖励
+            next_state: 下一个状态
+            """
+            path, bitrate = action
+            current_q = self.q_table[state + (path, bitrate)]
+            
+            # 计算下一状态的最大Q值
+            next_max_q = numpy.max(self.q_table[next_state])
+            
+            # Q-learning更新公式
+            new_q = current_q + self.learning_rate * (
+                reward + self.discount_factor * next_max_q - current_q
+            )
+            
+            self.q_table[state + (path, bitrate)] = new_q
+
+
+        def train_step(self, current_paths_state, action, quality, rebuffering_ratio, next_paths_state):
+            """
+            训练一个步骤
+            
+            参数:
+            current_paths_state: 当前路径状态
+            action: 执行的动作
+            quality: 获得的视频质量
+            rebuffering_ratio: 重缓冲比率
+            paths_state_before: 下一个路径状态
+            """
+            # 需要获取之前状态，则需要得知之前路径的rtt和吞吐量，就是在进行调度前的路径状态，
+            # 上一个状态的Q值就是Q表的Q值
+            current_state = history[]
+            next_state = self.discretize_state(next_paths_state)
+            reward = calculate_reward(quality, rebuffering_ratio)
+            
+            update(current_state, action, reward, next_state)
+
+        # self.qlearning_initial_explore()
+
+
         
 
 
@@ -817,10 +932,10 @@ class Downloader:
                         seg_no = i + 5
                         print("path ", k + 1, " is empty ", " raw prediction: ", prediction, " seg_no: ", i+5)
 
-                    path_id, resolution, bitrate, bitrate_level = parse_predication(prediction)
+                    path_id, resolution, bitrate, bitrate_level = parse_predication(prediction) # 决策的结果中获取
                     raw_prediction = prediction
                     path_id = k+1
-                    task = self.url[resolution][bitrate_level][seg_no]
+                    task = self.url[resolution][bitrate_level][seg_no] # 这里就已经选取了片段，url信息原来就有，下面则是增加片段信息
                     task["seg_no"] = seg_no
                     task["resolution"] = resolution
                     task["bitrate"] = bitrate
