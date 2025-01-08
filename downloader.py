@@ -30,6 +30,9 @@ DEBUG_WAIT_SECONDS = 10
 DEBUG = True
 
 
+# 进度详解，目前qlearning的算法已经了解，q表设置也解决，现在需要的是q表初始化以及q表的更新和决策效果。
+
+
 # 这里是通过将path_id映射成为网卡，通过http3请求发送出去。
 # 这里和mininet的有冲突
 if_name_mapping = {
@@ -171,8 +174,7 @@ class SimpleStateDiscretizer:
         返回:
         int: 状态空间的总大小 (400 = 20 × 20)
         """
-        # 总状态数 = 单条路径的状态数 × 单条路径的状态数
-        # = (4 × 5) × (4 × 5) = 20 × 20 = 400
+       
         return self.single_path_states * self.single_path_states
 
 
@@ -312,9 +314,14 @@ class Downloader:
 
                 stat = DownloadStat() # 获取rtt，throughput等指标
                 
-                # 在player处获得
+                # 在player处获得,在发起请求前，先获取重缓存率。
                 _playback_buffer_ratio_before = playback_buffer_frame_ratio.value
                 _rebuffering_ratio_before = rebuffering_ratio.value
+
+                if history is None:
+                    _bitrate_level_ratio_before = 0
+                else:
+                    _bitrate_level_ratio_before = history[-1]["bitrate_ratio"]
 
                 # 在请求之前获取路径的状态信息
                 path1_statistics = monitor_path(target_ip, network_interface1)
@@ -347,21 +354,23 @@ class Downloader:
                     "path1_rtt": path1_statistics["rtt"],
                     "path2_rtt": path2_statistics["rtt"],
 
+                    "bitrate_ratio": _bitrate_level_ratio,
+                    "bitrate_ratio_before": _bitrate_level_ratio_before,
+                    
                     # mab
                     "throughput": stat.throughput,
                     "rtt": stat.one_way_delay_avg / 1000.0 * 2,
                     "arm": task["arm"],
                     "seg_no": task["seg_no"],
                     "resolution": task["resolution"],
-                    "bitrate": task["bitrate"],
-                    "bitrate_ratio": _bitrate_level_ratio,
+                    "bitrate": task["bitrate"],            
                     "playback_buffer_ratio": _playback_buffer_ratio_before,
                     "rebuffering_ratio": _rebuffering_ratio_before,
                     "playback_buffer_ratio_after": _playback_buffer_ratio,
                     "rebuffering_ratio_after": _rebuffering_ratio,
                     "path_id": task["path_id"],
                     "initial_explore": task["initial_explore"],
-                    # 如果重缓存率下降，增大码率水平，若上升，怎减小码率水平
+                    # 如果重缓存率下降，增大码率水平，若上升,则减小码率水平
                     "reward": -1 * _bitrate_level_ratio if _rebuffering_ratio - _rebuffering_ratio_before > 0 else _bitrate_level_ratio,      
                 })
 
@@ -576,60 +585,27 @@ class Downloader:
 
     def qlearning_initial_explore(self):
         seg_no = 1
-        last_state = None
-        last_action = None
 
-        # 对每个路径进行探索
+        # 每个动作都尝试一次，共12个动作，这个作为初始动作
         for path_id in range(1, nb_paths + 1):
-            # 遍历所有可能的分辨率和码率组合
             for r, m in reversed(bitrate_mapping.items()):
                 for k, v in reversed(m.items()):
-                    # 获取当前状态
-                    # current_state = self.get_state_features()
-
-                    action = (path_id - 1) * get_nb_bitrates() + k
-                            
                     # 创建下载任务
                     task = self.url[r][k][seg_no]
-                    task.update({
-                        "seg_no": seg_no,
-                        "resolution": r,
-                        "bitrate": v,
-                        "path_id": path_id,
-                        "eos": 0,
-                        "initial_explore": 1,
-                        "action": action,
-                        "state": current_state  # 保存状态以便后续更新Q值
-                    })
-
-                                    
+                    task["seg_no"] = seg_no 
+                    task["resolution"] = r
+                    task["bitrate"] = v
+                    task["path_id"] = path_id
+                    task["eos"] = 0 # 等于1时表示视频段播放完，为0表示未播放完
+                    task["initial_explore"] = 1
+                    task["action"] = (path_id - 1) * get_nb_bitrates() + k
+         
                     self.scheduled[seg_no] = 1
                     self.download_queue[path_id - 1].put(task)
                     self.download_queue[path_id - 1].join()
-                    
-                    # 如果有上一个状态和动作，更新Q值
-                    if last_state is not None:
-                        # 计算奖励（基于下载完成后的实际效果）
-                        reward = self.calculate_reward(
-                            last_state,
-                            last_action,
-                            current_state
-                        )
-                        
-                        # 更新Q值
-                        self.update_q_value(
-                            last_state,
-                            last_action,
-                            reward,
-                            current_state
-                        )
-                    
-                    # 保存当前状态和动作，用于下一次更新
-                    last_state = current_state
-                    last_action = action
-                    
-                    # 更新片段编号
                     seg_no += 1
+                    
+                   
         print(f"{bcolors.RED}Initial exploration completed, Q-table initialized{bcolors.ENDC}")
         
         # 等待所有任务完成
@@ -641,22 +617,90 @@ class Downloader:
 
     
     def q_learning_scheduling(self):
+        def get_history_action():
+            # history在download函数中处理
+            _history_action = []
+            for x in history:
+                path_id = x["path_id"]
+                bitrate = x["bitrate"]
+                resolution = x["resolution"]
+                # 由清晰度和比特率获取比特率水平
+                bitrate_level = get_bitrate_level(resolution, bitrate)
+                nb_bitrates = get_nb_bitrates()
+                _history_action.append((path_id - 1) * nb_bitrates + bitrate_level)
+                # 和task["arm"] = (path_id - 1) * get_nb_bitrates() + k一样的计算方法
+
+            return _history_action
+        
+        def get_history_state():
+            _history_state = []
+            for x in history:
+                state_mapping = self.discretizer.get_multi_path_state(x["path1_rtt"], x["path1_throughput"], x["path2_rtt"], x["path2_throughput"])
+                _history_state.append(state_mapping)
+            return _history_state
+        
+        def get_history_quality():
+            _history_quality = []
+            for x in history:
+                quality = (x["bitrate_ratio_before"], x["bitrate_ratio"])
+                _history_quality.append(quality)
+            return _history_quality
+        
+        def get_history_rebuffering_ratio():
+            _history_rebuffering_ratio = []
+            for x in history:
+                rebuffering_ratio = (x["rebuffering_ratio"], x["rebuffering_ratio_after"])
+                _history_quality.append(rebuffering_ratio)
+            return _history_rebuffering_ratio
+
+        def choose_action(self, state):
+            """
+            使用ε-贪婪策略选择动作
+            
+            参数:
+            state: 离散化后的状态元组
+            """
+            if nump.random.random() < self.epsilon:
+                # 探索：随机选择动作
+                action = nump.random.randint(self.num_actions)
+                return action
+            else:
+                # 利用：选择Q值最大的动作
+                action = nump.unravel_index(
+                    nump.argmax(self.q_table[state]), 
+                )
+                return action
+
         def calculate_reward(quality, rebuffering_ratio):
             """
             计算奖励值
             
             参数:
-            quality: 视频质量评分
-            rebuffering_ratio: 重缓冲比率
+            quality: (上一个视频片段比特率水平率, 本视频片段比特率水平率)
+            rebuffering_ratio: 重缓冲比率 (上一个视频片段重缓存率, 本视频片段重缓存率)
             """
-            # 可以根据实际需求调整权重
-            quality_weight = 1.0
-            rebuffer_weight = -2.0
+
+            # 计算变化量
+            quality_change = quality[1] - quality[0]  # 比特率水平变化范围是[-1, 1]
             
-            return quality_weight * quality + rebuffer_weight * rebuffering_ratio
+            # 对重缓存率使用对数变换后计算变化
+            # 加1是为了避免log(0)的情况
+            rebuffer_change = np.log(rebuffering_ratio[1] + 1) - np.log(rebuffering_ratio[0] + 1)
+            
+            # 重缓存率的对数变化也可以用arctan进一步归一化到[-1, 1]范围
+            normalized_rebuffer_change = 2 * np.arctan(rebuffer_change) / np.pi
+            
+            # 设置权重
+            quality_weight = 3.0
+            rebuffer_weight = -1.5
+            
+            # 计算奖励
+            reward = quality_weight * quality_change + rebuffer_weight * normalized_rebuffer_change
+            
+            return reward
         
 
-        def update(self, state, action, reward, next_state):
+        def update(state, action, reward, next_state):
             """
             更新Q表
             
@@ -666,8 +710,7 @@ class Downloader:
             reward: 获得的奖励
             next_state: 下一个状态
             """
-            path, bitrate = action
-            current_q = self.q_table[state + (path, bitrate)]
+            current_q = self.q_table[state][action]
             
             # 计算下一状态的最大Q值
             next_max_q = numpy.max(self.q_table[next_state])
@@ -677,10 +720,10 @@ class Downloader:
                 reward + self.discount_factor * next_max_q - current_q
             )
             
-            self.q_table[state + (path, bitrate)] = new_q
+            self.q_table[state][action] = new_q
 
 
-        def train_step(self, current_paths_state, action, quality, rebuffering_ratio, next_paths_state):
+        def train_step(current_state, action, next_state, quality, rebuffering_ratio):
             """
             训练一个步骤
             
@@ -693,16 +736,24 @@ class Downloader:
             """
             # 需要获取之前状态，则需要得知之前路径的rtt和吞吐量，就是在进行调度前的路径状态，
             # 上一个状态的Q值就是Q表的Q值
-            current_state = history[]
-            next_state = self.discretize_state(next_paths_state)
             reward = calculate_reward(quality, rebuffering_ratio)
             
             update(current_state, action, reward, next_state)
 
-        # self.qlearning_initial_explore()
-
-
+        self.qlearning_initial_explore() # 初始化动作已安排，后面应该更新q表
+        # 历史数据都在history中，然后再用这些数据来更新Q表，遍历histroy
+        history_action = get_history_action()
+        history_state = get_history_state()
+        history_quality = get_history_quality()
+        history_rebuffering_ratio = get_history_rebuffering_ratio()
         
+
+        for i in range(len(history_action)-2):
+            train_step(history_state[i], history_action[i], history_state[i+1], history_quality[i], history_rebuffering_ratio[i])
+
+        # 初始化探索完，开始自动决策加更新
+
+
 
 
     def contextual_bandit_scheduling(self):
@@ -823,7 +874,7 @@ class Downloader:
             arm_n   
         ]
         """
-        history_arm = get_history_arm() # 就是获取过去的arm，arm可以表示为决策？
+        history_arm = get_history_arm() # 就是获取过去的arm，arm可以表示为决策
         history_reward = get_history_reward()[:len(history_arm)] # 获取过去arm的reward的列表
 
 
