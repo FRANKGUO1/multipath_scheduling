@@ -36,8 +36,8 @@ DEBUG = True
 # 这里是通过将path_id映射成为网卡，通过http3请求发送出去。
 # 这里和mininet的有冲突
 if_name_mapping = {
-    1: "h2-eth0",
-    2: "h2-eth1",
+    1: "h2-eth0",  # 高带宽高时延
+    2: "h2-eth1",  # 低带宽低时延
     -1: "h2-eth0",
 }
 
@@ -301,14 +301,60 @@ class Downloader:
             process_list[path_id].join()
 
 
+    def update_qtable(self, history):
+        def get_history_action():
+            # history在download函数中处理
+            _history_action = []
+            for x in history:
+                path_id = x["path_id"]
+                bitrate = x["bitrate"]
+                resolution = x["resolution"]
+                # 由清晰度和比特率获取比特率水平
+                bitrate_level = get_bitrate_level(resolution, bitrate)
+                nb_bitrates = get_nb_bitrates()
+                _history_action.append((path_id - 1) * nb_bitrates + bitrate_level)
+                # 和task["arm"] = (path_id - 1) * get_nb_bitrates() + k一样的计算方法
+
+            return _history_action
+        
+        def get_history_state():
+            _history_state = []
+            for x in history:
+                state_mapping = self.discretizer.get_multi_path_state(x["path1_rtt"], x["path1_throughput"], x["path2_rtt"], x["path2_throughput"])
+                _history_state.append(state_mapping)
+            return _history_state
+        
+        def get_history_quality():
+            _history_quality = []
+            for x in history:
+                quality = (x["bitrate_ratio_before"], x["bitrate_ratio"])
+                _history_quality.append(quality)
+            return _history_quality
+        
+        def get_history_rebuffering_ratio():
+            _history_rebuffering_ratio = []
+            for x in history:
+                rebuffering_ratio = (x["rebuffering_ratio"], x["rebuffering_ratio_after"])
+                _history_rebuffering_ratio.append(rebuffering_ratio)
+            return _history_rebuffering_ratio
+        
+        if len(history) >= 2:
+            history_action = get_history_action()
+            history_state = get_history_state()
+            history_quality = get_history_quality()
+            history_rebuffering_ratio = get_history_rebuffering_ratio()
+
+
+
+
+
+
     # 这个函数用于向服务器发请求，下载相关视频片段
     def download(self, path_id: int):
-        resolution_history = []
         while True:
             if self.download_queue[path_id].qsize() > 0:
                 # 监听下载队列，若下载队列有任务，则获取
                 task = self.download_queue[path_id].get()
-                resolution_history.append(task["resolution"]) 
                 if task["eos"] == 1:
                     break
 
@@ -373,6 +419,8 @@ class Downloader:
                     # 如果重缓存率下降，增大码率水平，若上升,则减小码率水平
                     "reward": -1 * _bitrate_level_ratio if _rebuffering_ratio - _rebuffering_ratio_before > 0 else _bitrate_level_ratio,      
                 })
+
+                self.update_qtable(history)
 
                 # 在探索阶段完成后，利用历史信息来进一步优化模型
                 if self.scheduler == "contextual_bandit":
@@ -456,7 +504,7 @@ class Downloader:
                     task["path_id"] = path_id
                     task["eos"] = 0 # 等于1时表示视频段播放完，为0表示未播放完
                     task["initial_explore"] = 1
-                    task["action"] = (path_id - 1) * get_nb_bitrates() + k # 记录每一个比特率等级的标识，路径1则是1-3，路径2则是6+（1-3）
+                    task["arm"] = (path_id - 1) * get_nb_bitrates() + k # 记录每一个比特率等级的标识，路径1则是1-3，路径2则是6+（1-3）
                     self.scheduled[seg_no] = 1 # 表示分辨率和比特率等级下的片段已经调度
                     self.download_queue[path_id - 1].put(task) # 这里使用path_id作为索引，0和1索引，表示两条路径的下载任务
                     self.download_queue[path_id - 1].join() # 等待多线程任务结束
@@ -650,25 +698,41 @@ class Downloader:
             _history_rebuffering_ratio = []
             for x in history:
                 rebuffering_ratio = (x["rebuffering_ratio"], x["rebuffering_ratio_after"])
-                _history_quality.append(rebuffering_ratio)
+                _history_rebuffering_ratio.append(rebuffering_ratio)
             return _history_rebuffering_ratio
 
-        def choose_action(self, state):
+        def get_smallest_unscheduled_segment():
+            for i in range(1, nb_segments):
+                if self.scheduled[i] == 0:
+                    return i
+
+        def parse_action(action) -> (int, int, float, int):
+            path_id = (action - 1) // get_nb_bitrates() + 1
+            bitrate_level = (action - 1) % get_nb_bitrates() + 1
+
+            # get resolution from bitrate_level in bitrate_mapping
+            resolution = get_resolution(bitrate_level)
+            return path_id, resolution, bitrate_mapping[resolution][bitrate_level], bitrate_level
+
+        def choose_unscheduled_path_action(state):
+            # 利用：选择Q值最大的动作
+            action = numpy.argmax(self.q_table[state][200:]) + 200 
+            return action
+
+        def choose_action(state):
             """
             使用ε-贪婪策略选择动作
             
             参数:
             state: 离散化后的状态元组
             """
-            if nump.random.random() < self.epsilon:
+            if numpy.random.random() < self.epsilon:
                 # 探索：随机选择动作
-                action = nump.random.randint(self.num_actions)
+                action = numpy.random.randint(self.num_actions)
                 return action
             else:
                 # 利用：选择Q值最大的动作
-                action = nump.unravel_index(
-                    nump.argmax(self.q_table[state]), 
-                )
+                action = numpy.argmax(self.q_table[state]) 
                 return action
 
         def calculate_reward(quality, rebuffering_ratio):
@@ -685,10 +749,10 @@ class Downloader:
             
             # 对重缓存率使用对数变换后计算变化
             # 加1是为了避免log(0)的情况
-            rebuffer_change = np.log(rebuffering_ratio[1] + 1) - np.log(rebuffering_ratio[0] + 1)
+            rebuffer_change = numpy.log(rebuffering_ratio[1] + 1) - numpy.log(rebuffering_ratio[0] + 1)
             
             # 重缓存率的对数变化也可以用arctan进一步归一化到[-1, 1]范围
-            normalized_rebuffer_change = 2 * np.arctan(rebuffer_change) / np.pi
+            normalized_rebuffer_change = 2 * numpy.arctan(rebuffer_change) / numpy.pi
             
             # 设置权重
             quality_weight = 3.0
@@ -699,7 +763,7 @@ class Downloader:
             
             return reward
         
-
+        # 更新q表应该单独写一个线程，不断读取history，一旦有新的就更新
         def update(state, action, reward, next_state):
             """
             更新Q表
@@ -722,7 +786,6 @@ class Downloader:
             
             self.q_table[state][action] = new_q
 
-
         def train_step(current_state, action, next_state, quality, rebuffering_ratio):
             """
             训练一个步骤
@@ -741,6 +804,7 @@ class Downloader:
             update(current_state, action, reward, next_state)
 
         self.qlearning_initial_explore() # 初始化动作已安排，后面应该更新q表
+
         # 历史数据都在history中，然后再用这些数据来更新Q表，遍历histroy
         history_action = get_history_action()
         history_state = get_history_state()
@@ -751,9 +815,93 @@ class Downloader:
         for i in range(len(history_action)-2):
             train_step(history_state[i], history_action[i], history_state[i+1], history_quality[i], history_rebuffering_ratio[i])
 
-        # 初始化探索完，开始自动决策加更新
 
+        # init_resolution=1080，init_bitrate_level=2，init_bitrate=71817.751
+        nb_segments = len(self.url[self.init_resolution][self.init_bitrate_level]) # 获取清晰度和比特率等级对应的视频片段数量
+        latest_selected_arm = 1
 
+        while True:
+            i = get_smallest_unscheduled_segment()
+
+            if i > nb_segments:
+                # 如果i大于比特率2的视频片段数量，是不是说明可以停止了？
+                task1 = dict()
+                task1["path_id"] = 1
+                task1["eos"] = 1
+                task1["initial_explore"] = 0
+                task2 = dict()
+                task2["path_id"] = 2
+                task2["eos"] = 1
+                task2["initial_explore"] = 0
+                self.download_queue[0].put(task1)
+                self.download_queue[1].put(task2)
+                break
+            
+            # DEBUG_SEGMENTS = 200
+            if DEBUG and i > DEBUG_SEGMENTS:
+                playback_buffer_map[i] = {
+                    "eos": 1,
+                    "frame_count": 0,
+                }
+                task1 = dict()
+                task1["path_id"] = 1
+                task1["eos"] = 1
+                task1["initial_explore"] = 0
+                task2 = dict()
+                task2["path_id"] = 2
+                task2["eos"] = 1
+                task2["initial_explore"] = 0
+                self.download_queue[0].put(task1)
+                self.download_queue[1].put(task2)
+                break
+
+            if playback_buffer_frame_ratio.value >= 1:
+                continue
+
+            if self.scheduled[i] == 1:
+                continue
+            
+            # 这里两个队列对象很牵强，我还以为是一个队列对象对应一个路径，但不是，而是对应一个任务
+            # 但这样会让数据更好吗？这里做保留意见，看看日后是否可以优化，如果这样的话只需一个队列对象即可
+            # 还不如这样，先决策出一个路径，若另一个路径空闲，则在Q表选择相同状态下的特定路径的最好reward
+            # 初始化探索完，开始自动决策加更新，获取当前的state
+            path1_statistics = monitor_path(target_ip, network_interface1)
+            path2_statistics = monitor_path(target_ip, network_interface2)
+
+            before_request_state = self.discretizer.get_multi_path_state(path1_statistics["rtt"], path1_statistics["throughput"], path2_statistics["rtt"], path2_statistics["throughput"])
+            selected_action = choose_action(before_request_state)
+            seg_no = i
+
+            path_id, resolution, bitrate, bitrate_level = parse_action(selected_action) # 决策的结果中获取
+            path_id = k+1
+            task = self.url[resolution][bitrate_level][seg_no] # 这里就已经选取了片段，url信息原来就有，下面则是增加片段信息
+            task["seg_no"] = seg_no
+            task["resolution"] = resolution
+            task["bitrate"] = bitrate
+            task["path_id"] = path_id
+            task["eos"] = 0
+            task["arm"] = selected_action
+            task["initial_explore"] = 0
+            self.scheduled[seg_no] = 1
+            self.download_queue[path_id - 1].put(task)
+            
+            for k in range(2):
+                if self.download_queue[k].qsize() == 0:
+                    # 若发现有路径为空，则先预取，预取值为q表对应值,调取的片段为i+5(暂定，这个可以以后调整)
+                    unscheduled_path_selected_action = choose_unscheduled_path_action(before_request_state)
+                    print("path ", k + 1, " is empty ", " raw action: ", unscheduled_path_selected_action, " seg_no: ", i+5)
+                    another_path_id, another_resolution, another_bitrate, another_bitrate_level = parse_action(unscheduled_path_selected_action)
+
+                    task1 = self.url[another_resolution][another_bitrate_level][i+5] # 这里就已经选取了片段，url信息原来就有，下面则是增加片段信息
+                    task1["seg_no"] = i + 5
+                    task1["resolution"] = another_resolution
+                    task1["bitrate"] = another_bitrate
+                    task1["path_id"] = another_path_id
+                    task1["eos"] = 0
+                    task1["arm"] = unscheduled_path_selected_action
+                    task1["initial_explore"] = 0
+                    self.scheduled[seg_no] = 1
+                    self.download_queue[another_path_id - 1].put(task1)
 
 
     def contextual_bandit_scheduling(self):
@@ -918,12 +1066,14 @@ class Downloader:
 
         # # init_resolution=1080，init_bitrate_level=2，init_bitrate=71817.751
         nb_segments = len(self.url[self.init_resolution][self.init_bitrate_level]) # 获取清晰度和比特率等级对应的视频片段数量
-        latest_selected_arm = 1
+        latest_selected_arm = 1 
+        # (path_id - 1) * get_nb_bitrates() + k  path_id=1,k=1 选择路径1和比特率等级为1的视频片段，即最高码率的视频
 
         while True:
             i = get_smallest_unscheduled_segment()
+            # 下面这些条件判断暂时未知
             if i > nb_segments:
-                # 如果i大于视频片段数量，说明之前的片段调度完毕，给任务队列添加新任务
+                # 如果i大于比特率2的视频片段数量，是不是说明可以停止了？
                 task1 = dict()
                 task1["path_id"] = 1
                 task1["eos"] = 1
@@ -972,17 +1122,19 @@ class Downloader:
                     
                     # 数据预处理
                     test = scaler.transform(test_df.values.astype('float64'))
-                    if k == 0:
+                    if k == 0: 
                         prediction = self.radius.predict(test)
                         # partial_fit is done after download finished, because only then we know the reward
                         latest_selected_arm = prediction
                         seg_no = i
                         print("path ", k + 1, " is empty ", " raw prediction: ", prediction, " seg_no: ", i)
                     else:
-                        prediction = latest_selected_arm
+                        prediction = latest_selected_arm 
+                        # 不是直接安排最大的码率传输，而是复用，先预取i+5的片段调度，码率和路径和之前一样
                         seg_no = i + 5
                         print("path ", k + 1, " is empty ", " raw prediction: ", prediction, " seg_no: ", i+5)
-
+                    
+                    # 这里的两个队列对象只是判断路径是否有任务，具体调度则是下面代码决定
                     path_id, resolution, bitrate, bitrate_level = parse_predication(prediction) # 决策的结果中获取
                     raw_prediction = prediction
                     path_id = k+1
