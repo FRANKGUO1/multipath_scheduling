@@ -8,22 +8,14 @@ from multiprocessing import Process, Manager
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from mabwiser.mab import MAB, LearningPolicy, NeighborhoodPolicy
-from collections import defaultdict, deque, namedtuple
-import threading
-from typing import Optional
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-
+from collections import defaultdict
 
 from mpd import parse_mpd
 from bitrate import get_initial_bitrate, get_bitrate_level, get_max_bitrate, get_nb_bitrates, get_resolution
 from bitrate import bitrate_mapping, build_arms
 from config import playback_buffer_map, max_playback_buffer_size, rebuffering_ratio, history
-from config import nb_paths, playback_buffer_frame_ratio, DEBUG_SEGMENTS, target_ip, network_interface1, network_interface2
+from config import nb_paths, playback_buffer_frame_ratio, DEBUG_SEGMENTS
 import config
-from get_delay_throughput import monitor_path
 
 default_mpd_url = "../mpd/stream.mpd"  # 提供mpd文件的地址
 default_host = "10.0.1.2"
@@ -35,26 +27,11 @@ DEBUG_WAIT_SECONDS = 10
 DEBUG = True
 
 
-# 进度详解，根据系统的实际情况，目前将算法改为DQN，然后再此基础上增加功能，
-# 现在感觉状态中添加过去三个时间窗口的rtt和吞吐量平均值和标准差，以及rtt和吞吐量相对于上一个时间篇的变化率也很重要
-
-
 # 这里是通过将path_id映射成为网卡，通过http3请求发送出去。
-# 这里和mininet的有冲突
 if_name_mapping = {
-    1: "h2-eth0",  # 高带宽高时延
-    2: "h2-eth1",  # 低带宽低时延
+    1: "h2-eth0",
+    2: "h2-eth1",
     -1: "h2-eth0",
-}
-
-interface_mapping = {
-    network_interface1: 1, 
-    network_interface2: 2
-}
-
-interface_data = {
-    network_interface1: {"latency": [], "throughput": []},
-    network_interface2: {"latency": [], "throughput": []},
 }
 
 
@@ -106,25 +83,6 @@ class DownloadStat(Structure):
     ]
 
 
-class DQN(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(DQN, self).__init__()
-        
-        # Neural network with 3 hidden layers，三个隐藏层
-        self.network = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, action_dim)
-        )
-    
-    def forward(self, x):
-        return self.network(x)
-
-
 class Downloader:
     # define an init function with optional parameters and type hints
 
@@ -146,12 +104,8 @@ class Downloader:
         self.manager = Manager()
         self.scheduler = scheduler
         self.algorithm = algorithm
-
-        self.num_actions = nb_paths * get_nb_bitrates()
-
-        self.learning_rate = 0.1
-        self.discount_factor = 0.9
-        self.epsilon = 0.1  # ε-贪婪策略的参数
+ 
+        self.Q_table = {}  # 初始化Q-table
 
         self.alpha = 0.7
         self.beta = 0.3
@@ -164,9 +118,7 @@ class Downloader:
         for i in range(nb_paths):
             self.download_queue.append(self.manager.Queue(maxsize=1)) # 这里的下载队列是两个队列对象，每一个队列对象最大容量为1
 
-        self.libplayer = CDLL("./libplayer.so") 
-        
-        # so 文件是 Linux 下的共享库格式，该文件实现了HTTP3请求的C库，可以直接调用
+        self.libplayer = CDLL("./libplayer.so") # so 文件是 Linux 下的共享库格式，该文件实现了HTTP3请求的C库，可以直接调用
 
         # 解析MPD，获取视频片段的字典，这个字典包含
         """
@@ -216,6 +168,10 @@ class Downloader:
         """
         if self.scheduler == "contextual_bandit":
             scheduling_process = Process(target=self.contextual_bandit_scheduling)
+        elif self.scheduler == "roundrobin":
+            scheduling_process = Process(target=self.roundrobin_scheduling)
+        elif self.scheduler == "minrtt":
+            scheduling_process = Process(target=self.minrtt_scheduling)
         elif self.scheduler == "q_learning":
             scheduling_process = Process(target=self.q_learning_scheduling)
         else:
@@ -235,29 +191,26 @@ class Downloader:
             process_list[path_id].join()
 
 
+    def get_reward(self, resolution_history, rebuffering_ratio, rebuffering_ratio_before, bitrate_level_ratio):
+        clarity_score = bitrate_level_ratio if  resolution_history[-1] - resolution_history[-2] > 0 else -1 * bitrate_level_ratio
+
+
     # 这个函数用于向服务器发请求，下载相关视频片段
     def download(self, path_id: int):
+        resolution_history = []
         while True:
             if self.download_queue[path_id].qsize() > 0:
                 # 监听下载队列，若下载队列有任务，则获取
                 task = self.download_queue[path_id].get()
+                resolution_history.append(task["resolution"]) 
                 if task["eos"] == 1:
                     break
 
                 stat = DownloadStat() # 获取rtt，throughput等指标
                 
-                # 在player处获得,在发起请求前，先获取重缓存率。
+                # 在player处获得
                 _playback_buffer_ratio_before = playback_buffer_frame_ratio.value
                 _rebuffering_ratio_before = rebuffering_ratio.value
-
-                if history is None:
-                    _bitrate_level_ratio_before = 0
-                else:
-                    _bitrate_level_ratio_before = history[-1]["bitrate_ratio"]
-
-                # 在请求之前获取路径的状态信息
-                path1_statistics = monitor_path(target_ip, network_interface1)
-                path2_statistics = monitor_path(target_ip, network_interface2)
 
                 # 这一部分就是利用libplayer库，向quic服务器发起请求，具体得看client.h，libplayer.so就是链接这个文件
                 with stdout_redirected(): # 使得下载过程C库的输出直接丢弃
@@ -277,37 +230,36 @@ class Downloader:
                 _rebuffering_ratio = rebuffering_ratio.value
                 _bitrate_level_ratio = task["bitrate"] * 1.0 / get_max_bitrate()  # 用当前的比特率除以最大的比特率就是目前的比特率比例，越接近1越好。
                 
+                rebuffering_diff = _rebuffering_ratio - _rebuffering_ratio_before
+                
+                if len(resolution_history) >= 2:
+                    resolution_diff = resolution_history[-1] - resolution_history[-2]                 
+                else:
+                    resolution_diff = 0
 
-                # 保存历史数据,这里来保存以往的数据
+                # 根据条件选择对应的比特率值
+                resolution_reward = _bitrate_level_ratio if resolution_diff >= 0 else -_bitrate_level_ratio
+                rebuffering_reward = -_bitrate_level_ratio if rebuffering_diff > 0 else _bitrate_level_ratio
+
+
+                # 保存历史数据
                 history.append({
-                    # q-learning添加部分
-                    "path1_throughput": path1_statistics["throughput"],
-                    "path2_throughput": path2_statistics["throughput"],
-                    "path1_rtt": path1_statistics["rtt"],
-                    "path2_rtt": path2_statistics["rtt"],
-
-                    "bitrate_ratio": _bitrate_level_ratio,
-                    "bitrate_ratio_before": _bitrate_level_ratio_before,
-                    
-                    # mab
-                    "throughput": stat.throughput,
-                    "rtt": stat.one_way_delay_avg / 1000.0 * 2,
                     "arm": task["arm"],
                     "seg_no": task["seg_no"],
                     "resolution": task["resolution"],
-                    "bitrate": task["bitrate"],            
+                    "bitrate": task["bitrate"],
+                    "bitrate_ratio": _bitrate_level_ratio,
+                    "throughput": stat.throughput,
+                    "rtt": stat.one_way_delay_avg / 1000.0 * 2,
                     "playback_buffer_ratio": _playback_buffer_ratio_before,
                     "rebuffering_ratio": _rebuffering_ratio_before,
                     "playback_buffer_ratio_after": _playback_buffer_ratio,
                     "rebuffering_ratio_after": _rebuffering_ratio,
                     "path_id": task["path_id"],
                     "initial_explore": task["initial_explore"],
-                    # 如果重缓存率下降，增大码率水平，若上升,则减小码率水平
-                    "reward": -1 * _bitrate_level_ratio if _rebuffering_ratio - _rebuffering_ratio_before > 0 else _bitrate_level_ratio,      
+                    # "reward": -1 * _bitrate_level_ratio if _rebuffering_ratio - _rebuffering_ratio_before > 0 else _bitrate_level_ratio, 
+                    "reward": self.alpha * resolution_reward + self.beta * rebuffering_reward,           
                 })
-
-                if len(history) >= 12:
-                    self.update_qtable(history[-2:])
 
                 # 在探索阶段完成后，利用历史信息来进一步优化模型
                 if self.scheduler == "contextual_bandit":
@@ -319,8 +271,121 @@ class Downloader:
 
                 if DEBUG_WAIT:
                     time.sleep(DEBUG_WAIT_SECONDS)
+
+    def sequential_scheduling(self):
+        for i in range(1, len(self.url[self.init_resolution][self.init_bitrate_level])):
+            task = self.url[self.init_resolution][self.init_bitrate_level][i]
+            task["seg_no"] = i
+            task["resolution"] = self.init_resolution
+            task["bitrate"] = self.init_bitrate
+            task["path_id"] = -1
+            task["eos"] = 0
+            self.download_queue[-1].put(task)
+
+        self.download_queue[-1].put({
+            "eos": 1
+        })
+
+    def get_latest_bw_on_path(self, path_id: int):
+        for i in range(len(history) - 1, -1, -1):
+            if history[i]["path_id"] == path_id:
+                return history[i]["throughput"]
+        return 0
+
+    """
+    :return min_rtt_path_id (0, 1)
+    """
+    def get_minrtt_path_id(self):
+        min_rtt = 999999
+        min_rtt_path_id = 0
+        for path_id in range(nb_paths):
+            for i in range(len(history) - 1, -1, -1):
+                if history[i]["path_id"] - 1 == path_id:
+                    if history[i]["rtt"] < min_rtt:
+                        min_rtt = history[i]["rtt"]
+                        min_rtt_path_id = path_id
+                    break
+        return min_rtt_path_id
     
-      
+
+    def get_state_features(self):
+        pass
+
+
+    def qlearning_initial_explore(self):
+        if not hasattr(self, 'q_table'):
+            self.q_table = numpy.zeros((
+                self.n_throughput_levels,
+                self.n_rtt_levels,
+                self.n_buffer_levels,
+                self.n_bitrate_levels,
+                nb_paths * get_nb_bitrates()
+        ))
+            
+        seg_no = 1
+        last_state = None
+        last_action = None
+
+         # 对每个路径进行探索
+        for path_id in range(1, nb_paths + 1):
+            # 遍历所有可能的分辨率和码率组合
+            for r, m in reversed(bitrate_mapping.items()):
+                for k, v in reversed(m.items()):
+                    # 获取当前状态
+                    current_state = self.get_state_features()
+
+                    action = (path_id - 1) * get_nb_bitrates() + k
+                               
+                    # 创建下载任务
+                    task = self.url[r][k][seg_no]
+                    task.update({
+                        "seg_no": seg_no,
+                        "resolution": r,
+                        "bitrate": v,
+                        "path_id": path_id,
+                        "eos": 0,
+                        "initial_explore": 1,
+                        "action": action,
+                        "state": current_state  # 保存状态以便后续更新Q值
+                    })
+             
+                    self.scheduled[seg_no] = 1                   
+                    self.download_queue[path_id - 1].put(task)
+                    self.download_queue[path_id - 1].join()
+                    
+                    # 如果有上一个状态和动作，更新Q值
+                    if last_state is not None:
+                        # 计算奖励（基于下载完成后的实际效果）
+                        reward = self.calculate_reward(
+                            last_state,
+                            last_action,
+                            current_state
+                        )
+                        
+                        # 更新Q值
+                        self.update_q_value(
+                            last_state,
+                            last_action,
+                            reward,
+                            current_state
+                        )
+                    
+                    # 保存当前状态和动作，用于下一次更新
+                    last_state = current_state
+                    last_action = action
+                    
+                    # 更新片段编号
+                    seg_no += 1
+        print(f"{bcolors.RED}Initial exploration completed, Q-table initialized{bcolors.ENDC}")
+        
+        # 等待所有任务完成
+        for i in range(nb_paths):
+            self.download_queue[i].join()
+    
+        for h in history:
+            print(h)
+            
+            
     def initial_explore(self):
         # nb_paths为2
         seg_no = 1
@@ -362,14 +427,18 @@ class Downloader:
                     seg_no += 1 # 处理下一个片段
 
         print(f"{bcolors.RED}all initial explore tasks are put into queue {bcolors.ENDC}")
-        # 表明所有初始化探索任务被放进队列中了
+        # 表名所有初始化探索任务被放进队列中了
 
         for i in range(nb_paths):
             self.download_queue[i].join()  # 确保任务全部完成
 
         for h in history:
             print(h) # 这里history是可以进程共享的
-  
+
+    """
+    get the highest resolution, bitrate and bitrate_level to the given bandwidth
+    :return: resolution, bitrate, bitrate_level
+    """
     def get_closest_resolution_and_bitrate_level(self, bw: float):
         r, b, bl = 360, 4481.84, 6
         for resolution in bitrate_mapping:
@@ -380,6 +449,107 @@ class Downloader:
                     bl = bitrate_level
                     return r, b, bl
         return r, b, bl
+
+    def roundrobin_scheduling(self):
+        print("##roundrobin scheduling is selected##")
+        i = 1
+        last_path_id = 0
+        while True:
+            if DEBUG and i > DEBUG_SEGMENTS:
+                playback_buffer_map[i] = {
+                    "eos": 1,
+                    "frame_count": 0,
+                }
+                for i in range(nb_paths):
+                    task = dict()
+                    task["path_id"] = i+1
+                    task["eos"] = 1
+                    task["initial_explore"] = 0
+                    self.download_queue[i].put(task)
+                break
+
+            if playback_buffer_frame_ratio.value >= 1:
+                continue
+
+            if self.scheduled[i] == 1:
+                continue
+
+            # 0, 1
+            path_id = last_path_id ^ 1
+            last_path_id = path_id
+
+            bw = self.get_latest_bw_on_path(path_id+1)
+
+            resolution, bitrate, bitrate_level = self.get_closest_resolution_and_bitrate_level(bw)
+            print("bw on path %d is %f, r: %d, b: %f, bl: %d" % (path_id+1, bw, resolution, bitrate, bitrate_level))
+
+            seg_no = i
+
+            task = self.url[resolution][bitrate_level][seg_no]
+            task["seg_no"] = seg_no
+            task["arm"] = -1
+            task["resolution"] = resolution
+            task["bitrate"] = bitrate
+            task["path_id"] = path_id+1
+            task["eos"] = 0
+            task["initial_explore"] = 0
+            self.scheduled[seg_no] = 1
+            self.download_queue[path_id].put(task)
+
+            i += 1
+
+    def minrtt_scheduling(self):
+        print("##minrtt scheduling is selected##")
+
+        self.initial_explore()
+        self.initial_explore_done = True
+
+        i = 13
+        while True:
+            if DEBUG and i > DEBUG_SEGMENTS:
+                playback_buffer_map[i] = {
+                    "eos": 1,
+                    "frame_count": 0,
+                }
+                for i in range(nb_paths):
+                    task = dict()
+                    task["path_id"] = i + 1
+                    task["eos"] = 1
+                    task["initial_explore"] = 0
+                    self.download_queue[i].put(task)
+                break
+
+            if playback_buffer_frame_ratio.value >= 1:
+                continue
+
+            if self.scheduled[i] == 1:
+                continue
+
+            # 0, 1
+            path_id = self.get_minrtt_path_id()
+            bw = self.get_latest_bw_on_path(path_id + 1)
+
+            resolution, bitrate, bitrate_level = self.get_closest_resolution_and_bitrate_level(bw)
+            print("bw on path %d is %f, r: %d, b: %f, bl: %d" % (path_id + 1, bw, resolution, bitrate, bitrate_level))
+
+            seg_no = i
+
+            task = self.url[resolution][bitrate_level][seg_no]
+            task["seg_no"] = seg_no
+            task["arm"] = -1
+            task["resolution"] = resolution
+            task["bitrate"] = bitrate
+            task["path_id"] = path_id + 1
+            task["eos"] = 0
+            task["initial_explore"] = 0
+            self.scheduled[seg_no] = 1
+            self.download_queue[path_id].put(task)
+
+            i += 1
+
+
+    def q_learning_scheduling(self):
+        pass
 
     def contextual_bandit_scheduling(self):
         def get_history_arm():
@@ -499,7 +669,7 @@ class Downloader:
             arm_n   
         ]
         """
-        history_arm = get_history_arm() # 就是获取过去的arm，arm可以表示为决策
+        history_arm = get_history_arm() # 就是获取过去的arm，arm可以表示为决策？
         history_reward = get_history_reward()[:len(history_arm)] # 获取过去arm的reward的列表
 
 
@@ -543,14 +713,12 @@ class Downloader:
 
         # # init_resolution=1080，init_bitrate_level=2，init_bitrate=71817.751
         nb_segments = len(self.url[self.init_resolution][self.init_bitrate_level]) # 获取清晰度和比特率等级对应的视频片段数量
-        latest_selected_arm = 1 
-        # (path_id - 1) * get_nb_bitrates() + k  path_id=1,k=1 选择路径1和比特率等级为1的视频片段，即最高码率的视频
+        latest_selected_arm = 1
 
         while True:
             i = get_smallest_unscheduled_segment()
-            # 下面这些条件判断暂时未知
             if i > nb_segments:
-                # 如果i大于比特率2的视频片段数量，是不是说明可以停止了？
+                # 如果i大于视频片段数量，说明之前的片段调度完毕，给任务队列添加新任务
                 task1 = dict()
                 task1["path_id"] = 1
                 task1["eos"] = 1
@@ -599,23 +767,21 @@ class Downloader:
                     
                     # 数据预处理
                     test = scaler.transform(test_df.values.astype('float64'))
-                    if k == 0: 
+                    if k == 0:
                         prediction = self.radius.predict(test)
                         # partial_fit is done after download finished, because only then we know the reward
                         latest_selected_arm = prediction
                         seg_no = i
                         print("path ", k + 1, " is empty ", " raw prediction: ", prediction, " seg_no: ", i)
                     else:
-                        prediction = latest_selected_arm 
-                        # 不是直接安排最大的码率传输，而是复用，先预取i+5的片段调度，码率和路径和之前一样
+                        prediction = latest_selected_arm
                         seg_no = i + 5
                         print("path ", k + 1, " is empty ", " raw prediction: ", prediction, " seg_no: ", i+5)
-                    
-                    # 这里的两个队列对象只是判断路径是否有任务，具体调度则是下面代码决定
-                    path_id, resolution, bitrate, bitrate_level = parse_predication(prediction) # 决策的结果中获取
+
+                    path_id, resolution, bitrate, bitrate_level = parse_predication(prediction)
                     raw_prediction = prediction
                     path_id = k+1
-                    task = self.url[resolution][bitrate_level][seg_no] # 这里就已经选取了片段，url信息原来就有，下面则是增加片段信息
+                    task = self.url[resolution][bitrate_level][seg_no]
                     task["seg_no"] = seg_no
                     task["resolution"] = resolution
                     task["bitrate"] = bitrate
@@ -633,17 +799,3 @@ class Downloader:
                         f"resolution: %d, bitrate_level: %d{bcolors.ENDC}" % (
                             seg_no, raw_prediction, prediction, path_id, resolution,
                             bitrate_level))
-
-
-# if __name__ == "__main__":
-    # path1_result = monitor_path(target_ip, network_interface1)
-    # path2_result = monitor_path(target_ip, network_interface2)
-
-    # print(f"RTT (ms): {path1_result['rtt']}")
-    # print(f"吞吐量 (KB/s): {path1_result['throughput']}")
-
-    # print(f"RTT (ms): {path2_result['rtt']}")
-    # print(f"吞吐量 (KB/s): {path2_result['throughput']}")
-
-
-

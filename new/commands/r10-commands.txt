@@ -1,0 +1,6 @@
+table_add MyIngress.ipv4_lpm ipv4_forward 0 10.3.1.2/24 => 02:72:b7:00:be:30 2
+table_add MyIngress.ipv4_lpm ipv4_forward 1 10.3.1.2/24 => 2e:90:11:5a:67:5f 3
+
+
+table_add MyIngress.ipv4_lpm ipv4_forward 0 10.10.1.2/24 => 00:00:0a:0a:01:02 1
+table_add MyIngress.ipv4_lpm ipv4_forward 1 10.10.1.2/24 => 00:00:0a:0a:01:02 1
