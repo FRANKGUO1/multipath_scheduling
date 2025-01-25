@@ -19,27 +19,39 @@ net.addHost('d1')
 net.addHost('d2')
 net.addHost('d3')
 
+"""
+net.addP4RuntimeSwitch('r1', cli_input='commands/r1-commands.txt', cpu_port=255)
+net.addP4RuntimeSwitch('r2', cli_input='commands/r2-commands.txt', cpu_port=255)
+net.addP4RuntimeSwitch('r3', cli_input='commands/r3-commands.txt', cpu_port=255)
+net.addP4RuntimeSwitch('r8', cli_input='commands/r8-commands.txt', cpu_port=255)
+net.addP4RuntimeSwitch('r9', cli_input='commands/r9-commands.txt', cpu_port=255)
+net.addP4RuntimeSwitch('r10', cli_input='commands/r10-commands.txt', cpu_port=255)
+"""
+
 net.addP4Switch('r1', cli_input='commands/r1-commands.txt')
 net.addP4Switch('r2', cli_input='commands/r2-commands.txt')
 net.addP4Switch('r3', cli_input='commands/r3-commands.txt')
-net.addP4Switch('r4', cli_input='commands/r4-commands.txt')
-net.addP4Switch('r5', cli_input='commands/r5-commands.txt')
-net.addP4Switch('r6', cli_input='commands/r6-commands.txt')
-net.addP4Switch('r7', cli_input='commands/r7-commands.txt')
 net.addP4Switch('r8', cli_input='commands/r8-commands.txt')
 net.addP4Switch('r9', cli_input='commands/r9-commands.txt')
 net.addP4Switch('r10', cli_input='commands/r10-commands.txt')
 
-net.setP4Source('r1','p4code/r1.p4')
-net.setP4Source('r2','p4code/r2.p4')
-net.setP4Source('r3','p4code/r3.p4')
-net.setP4Source('r4','p4code/r4.p4')
-net.setP4Source('r5','p4code/r5.p4')
-net.setP4Source('r6','p4code/r6.p4')
-net.setP4Source('r7','p4code/r7.p4')
-net.setP4Source('r8','p4code/r8.p4')
-net.setP4Source('r9','p4code/r9.p4')
-net.setP4Source('r10','p4code/r10.p4')
+net.addP4Switch('r4', cli_input='commands/r4-commands.txt')
+net.addP4Switch('r5', cli_input='commands/r5-commands.txt')
+net.addP4Switch('r6', cli_input='commands/r6-commands.txt')
+net.addP4Switch('r7', cli_input='commands/r7-commands.txt')
+
+
+net.setP4Source('r1','p4code/edge_switch.p4')
+net.setP4Source('r2','p4code/edge_switch.p4')
+net.setP4Source('r3','p4code/edge_switch.p4')
+net.setP4Source('r8','p4code/edge_switch.p4')
+net.setP4Source('r9','p4code/edge_switch.p4')
+net.setP4Source('r10','p4code/edge_switch.p4')
+
+net.setP4Source('r4','p4code/core_switch.p4')
+net.setP4Source('r5','p4code/core_switch.p4')
+net.setP4Source('r6','p4code/core_switch.p4')
+net.setP4Source('r7','p4code/core_switch.p4')
 
 # 
 net.addLink('s1', 'r1')
@@ -75,7 +87,6 @@ net.setIntfMac('h2', 's1', 'a0:36:9f:08:d1:2b')
 net.setIntfMac('s1', 'h2', 'd0:36:9f:ed:5c:63')
 net.setIntfMac('s1', 'h2', 'a0:36:9f:08:c7:b7')
 net.setIntfMac('h2', 's1', 'e8:61:1f:37:b5:8b')
-
 
 net.setIntfIp('s1', 'r1', '10.0.1.2/24')
 net.setIntfIp('s1', 'r2', '10.0.1.3/24')
