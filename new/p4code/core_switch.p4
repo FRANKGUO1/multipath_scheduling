@@ -47,10 +47,14 @@ header probe_header_t {
     bit<8> num_probe_data;    //记录这个探测包已经通过了几个交换机
 }
 
+header probe_fwd_h {
+    bit<8>   src_dst_id; // 交换机路径标识
+}
+
 header probe_data_t {
-    bit<8>    swid;      //控制层告诉这个交换机自己的ID是多少
-    bit<8>    ingress_port;
-    bit<8>    egress_port;
+    bit<8>    swid;      
+    // bit<8>    ingress_port;
+    // bit<8>    egress_port;
     bit<32>   ingress_byte_cnt;
     bit<32>   egress_byte_cnt;
     bit<48>    ingress_last_time;
@@ -118,14 +122,15 @@ struct metadata {
 }
 
 struct headers {
-    ethernet_h   ethernet;
-    arp_h        arp;
+    ethernet_h               ethernet;
     probe_header_t           probe_header;
+    probe_fwd_h              probe_fwd;
     probe_data_t[MAX_HOPS]   probe_data;
-    ipv4_t       ipv4;
-    icmp_h       icmp;
-    tcp_h        tcp;
-    udp_h        udp;
+    arp_h                    arp;
+    ipv4_t                   ipv4;
+    icmp_h                   icmp;
+    tcp_h                    tcp;
+    udp_h                    udp;  
 }
 
 /*************************************************************************
@@ -138,6 +143,7 @@ parser MyParser(packet_in packet,
                 inout standard_metadata_t standard_metadata) {
 
     state start {
+        meta = {0, 0, 0, 0, 0, 0, 0, 0};
         packet.extract(hdr.ethernet);
         transition select(hdr.ethernet.ether_type){
             TYPE_ARP: parse_arp;
@@ -151,8 +157,13 @@ parser MyParser(packet_in packet,
     state parse_probe {
         packet.extract(hdr.probe_header);
         meta.remaining1=hdr.probe_header.num_probe_data;
-        transition select(hdr.probe_header.num_probe_data){
-            0:accept;                           //情况2：得到了以太网+INT头部
+        transition parse_probe_fwd_h;
+    }
+
+    state parse_probe_fwd_h {
+        packet.extract(hdr.probe_fwd);
+        transition select(meta.remaining1) {
+            0: accept;
             default:parse_probe_list;
         }
     }
@@ -165,7 +176,6 @@ parser MyParser(packet_in packet,
             default: parse_probe_list;
         }
     }
-
 
      state parse_arp {
         packet.extract(hdr.arp);
@@ -225,17 +235,11 @@ control MyIngress(inout headers hdr,
     }
 
     action ipv4_forward(egressSpec_t port) {
-        // Set the output port that we also get from the table
-        // hdr.ethernet.src_mac = hdr.ethernet.dst_mac;
-        // hdr.ethernet.dst_mac = dst_mac;
         standard_metadata.egress_spec = port;
         // Decrease ttl by 1
         hdr.ipv4.ttl = hdr.ipv4.ttl -1;
     }
 
-    action set_swid(bit<8> swid) {
-        hdr.probe_data[0].swid = swid;
-    }
 
     table ipv4_lpm {
         key = {
@@ -250,16 +254,20 @@ control MyIngress(inout headers hdr,
         default_action = NoAction();
     }
 
-    table swid {
-    	key = {
-           hdr.ethernet.ether_type: exact;       //第一个交换机中用，写一条流表项，键分别是INT的以太网类型/////change!!!!!!
+    action probe_forward(bit<9> port) {
+        standard_metadata.egress_spec = port;
+    }
+
+    table probe_exact {
+        key = {
+            hdr.probe_fwd.src_dst_id: exact;       
         }
         actions = {
-            set_swid;
-            NoAction;
+            probe_forward;
         }
-        default_action = NoAction();
+        size = 1024;
     }
+
 
     apply {
         bit<32> packet_cnt;
@@ -268,6 +276,7 @@ control MyIngress(inout headers hdr,
         bit<32> new_byte_cnt;
         bit<48> last_time;
         bit<48> cur_time = standard_metadata.ingress_global_timestamp;
+    
         byte_cnt_reg.read(byte_cnt, (bit<32>)standard_metadata.ingress_port);
         byte_cnt = byte_cnt + standard_metadata.packet_length;
         new_byte_cnt = (hdr.probe_header.isValid()) ? 0 : byte_cnt;
@@ -282,8 +291,8 @@ control MyIngress(inout headers hdr,
             hdr.probe_data.push_front(1);
             hdr.probe_data[0].setValid();    //说明这就是一个INT包
             hdr.probe_header.num_probe_data=hdr.probe_header.num_probe_data+1;
-            swid.apply();
-            hdr.probe_data[0].ingress_port = (bit<8>)standard_metadata.ingress_port;
+            hdr.probe_data[0].swid = hdr.probe_fwd.src_dst_id;
+            // hdr.probe_data[0].ingress_port = (bit<8>)standard_metadata.ingress_port;
             hdr.probe_data[0].ingress_byte_cnt = byte_cnt;
 
             last_time_reg.read(last_time, (bit<32>)standard_metadata.ingress_port);
@@ -291,6 +300,8 @@ control MyIngress(inout headers hdr,
             hdr.probe_data[0].ingress_last_time = last_time;
             hdr.probe_data[0].ingress_cur_time = cur_time;
             hdr.probe_data[0].ingress_packet_count = packet_cnt;
+
+            probe_exact.apply();
         }
         // Only if IPV4 the rule is applied. Therefore other packets will not be forwarded.
         if (hdr.ipv4.isValid()){
@@ -329,7 +340,7 @@ control MyEgress(inout headers hdr,
         packet_cnt_reg.write((bit<32>)standard_metadata.egress_port, new_packet_cnt);
 
         if(hdr.probe_header.isValid()){
-            hdr.probe_data[0].egress_port = (bit<8>)standard_metadata.egress_port;
+            // hdr.probe_data[0].egress_port = (bit<8>)standard_metadata.egress_port;
             hdr.probe_data[0].egress_byte_cnt = byte_cnt;
 
             last_time_reg.read(last_time, (bit<32>)standard_metadata.egress_port);
@@ -376,6 +387,7 @@ control MyDeparser(packet_out packet, in headers hdr) {
 
         packet.emit(hdr.ethernet);
         packet.emit(hdr.probe_header);
+        packet.emit(hdr.probe_fwd);
         packet.emit(hdr.probe_data);
         packet.emit(hdr.ipv4);
         packet.emit(hdr.arp);

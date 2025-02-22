@@ -5,3 +5,12 @@ table_add MyIngress.ipv4_lpm ipv4_forward 10.10.1.2/24 => 4
 table_add MyIngress.ipv4_lpm ipv4_forward 10.1.1.2/24 => 1
 table_add MyIngress.ipv4_lpm ipv4_forward 10.2.1.2/24 => 2
 table_add MyIngress.ipv4_lpm ipv4_forward 10.3.1.2/24 => 3
+
+
+table_add MyIngress.probe_exact probe_forward 61 => 4
+table_add MyIngress.probe_exact probe_forward 62 => 4
+table_add MyIngress.probe_exact probe_forward 63 => 4
+
+table_add MyIngress.probe_exact probe_forward 16 => 1
+table_add MyIngress.probe_exact probe_forward 26 => 2
+table_add MyIngress.probe_exact probe_forward 36 => 3

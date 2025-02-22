@@ -1,6 +1,19 @@
 import subprocess
 import numpy as np
 import random
+from int_send import send
+import subprocess
+import threading
+import time
+import sys
+from config import DATAINTERVAL, requirements, priorities, services, intsend_devices, intreceive_devices
+from multiprocessing import Process
+import iperf3
+import concurrent.futures
+from scheduling_algorithm import CMAB
+from switch_cli import run_simple_switch_cli
+from get_data import get_latest_data_to_path_stats
+import argparse
 
 # traceroute 可以查看到每一跳的时延
 
@@ -11,145 +24,192 @@ import random
 # 先跑通一版吧，实现INT测试路径的单向时延和吞吐量以及剩余带宽（其实丢包率也可以考虑进去），服务需求则在奖励函数中实现。
 # 奖励函数包括服务的带宽，时延，丢包率需求，还有服务的优先级和路径的带宽利用率等。优先级越高的奖励越大，进而保障获取更多的资源
 
-class CMAB:
-    def __init__(self, services, path_stats, priorities, requirements):
-        self.services = services
-        self.path_stats = path_stats
-        self.priorities = priorities
-        self.requirements = requirements
-        self.n_services = len(services)
-        self.n_paths = 2  # 每个服务有两条路径
-        self.q_table = np.zeros((self.n_services, self.n_paths))  # Q表，存储每条路径的预期奖励
-        self.counts = np.zeros((self.n_services, self.n_paths))  # 每条路径被选择的次数
-        self.total_bandwidth_usage = np.zeros(self.n_services)  # 每个服务的带宽使用情况
 
-    # 基于UCB策略选择路径，这里可以扩展，基于贪婪，基于TS
-    def choose_path(self, service):
-        service_idx = self.services.index(service)
-        total_counts = np.sum(self.counts[service_idx])
-        
-        if total_counts == 0:
-            return np.random.choice(self.n_paths)  # 如果没有选择过路径，则随机选择
-        ucb_values = self.q_table[service_idx] + np.sqrt(2 * np.log(total_counts) / (self.counts[service_idx] + 1e-5))
-        return np.argmax(ucb_values)  # 选择Q值最大的路径
-
-    def update_q_table(self, service, path, reward):
-        service_idx = self.services.index(service)
-        self.counts[service_idx, path] += 1
-        # 更新Q值
-        self.q_table[service_idx, path] += (reward - self.q_table[service_idx, path]) / self.counts[service_idx, path]
-
-    def calculate_reward(self, service, path):
-        # 计算路径的奖励，加入路径历史状态和公平性作为上下文
-        bandwidth, latency, loss_rate, load = self.path_stats[service][path][-1]
-        required_bandwidth = self.requirements[service]['bandwidth']
-        required_latency = self.requirements[service]['latency']
-        required_loss_rate = self.requirements[service]['loss_rate']
-
-        
-        # 服务的优先级作为上下文
-        priority = self.priorities[service]
-        
-        # 计算历史状态的平均值，用于路径的历史表现评估
-        historical_bandwidth = np.mean([x[0] for x in path_stats[service][path]])
-        historical_latency = np.mean([x[1] for x in path_stats[service][path]])
-        historical_loss_rate = np.mean([x[2] for x in path_stats[service][path]])
-        historical_load = np.mean([x[3] for x in path_stats[service][path]])
-
-        # 计算奖励，加入历史状态的影响
-        bandwidth_reward = min(bandwidth / required_bandwidth, 1) * (1 + historical_bandwidth / bandwidth)
-        latency_reward = max(1 - latency / required_latency, 0) * (1 + historical_latency / latency)
-    
-        loss_penalty = max(loss_rate, required_loss_rate) * (1 + historical_loss_rate / loss_rate)
-        load_penalty = max(load, 0.9) * (1 + historical_load / load)
-
-        # **引入公平性**
-        # 计算带宽使用的公平性调整，避免某个服务占用过多资源
-        total_bandwidth = np.sum(self.total_bandwidth_usage)  # 带宽总体使用是如何计算的？
-        if total_bandwidth == 0:
-            fairness_factor = 0  # 防止除以零
-        else:
-            service_bandwidth = self.total_bandwidth_usage[self.services.index(service)]
-            fairness_factor = 1 - (service_bandwidth / total_bandwidth)  # 公平性因子
-        fairness_penalty = max(0, fairness_factor)  # 如果服务占用过多带宽，公平性惩罚增大
-        
-        # 总奖励，结合服务的优先级（上下文信息）、历史状态和公平性
-        reward = np.nan_to_num(priority * ( bandwidth_reward + latency_reward) - loss_penalty - load_penalty - fairness_penalty)
-        
-        return reward
-
-    def schedule(self):
-        for service in self.services:
-            # 为每个服务选择路径
-            path = self.choose_path(service)
-            reward = self.calculate_reward(service, path)  # 计算奖励
-            print(service, ":", reward)
-            self.update_q_table(service, path, reward)  # 更新Q表
-
-            # 更新服务的带宽使用情况
-            bandwidth, _, _, _ = self.path_stats[service][path][-1]
-            self.total_bandwidth_usage[self.services.index(service)] += bandwidth
-
-    def resource_balance(self):
-        # 资源平衡：根据当前带宽使用情况调整每个服务的路径选择
-        total_bandwidth = np.sum(self.total_bandwidth_usage)
-        for i, service in enumerate(self.services):
-            service_bandwidth = self.total_bandwidth_usage[i]
-            if service_bandwidth > total_bandwidth / len(self.services):  # 如果某服务占用过多带宽
-                # 给低带宽使用的服务优先分配资源
-                self.total_bandwidth_usage[i] *= 0.8  # 稍微降低占用过多带宽的服务使用
-            else:
-                self.total_bandwidth_usage[i] *= 1.2  # 提供更多带宽给低带宽使用的服务
+def run_command(command):
+    print(f"正在运行: {command}")
+    subprocess.Popen(command, shell=True)
 
 
-def send_cli_commands(commands, thrift_port):
+def run_iperf3(server_ip):
     """
-    向 simple_switch_CLI 发送一系列命令，并返回输出。
-    
-    :param commands: 要发送的命令列表
-    :param thrift_port: Thrift 端口号，默认为 9090
-    :return: 每个命令的输出结果
+    运行 iperf3 UDP 测试并返回性能指标
+    参数:
+        server_ip (str): 服务器的 IP 地址
+    返回:
+        dict: 包含吞吐量、抖动和丢包率的字典，或 None 如果测试失败
     """
-    try:
-        # 启动 simple_switch_CLI 进程
-        with subprocess.Popen(
-            ['simple_switch_CLI', '--thrift-port', str(thrift_port)],
-            stdin=subprocess.PIPE,  # 允许写入命令
-            stdout=subprocess.PIPE, # 获取命令输出
-            stderr=subprocess.PIPE,
-            text=True  # 自动处理文本（字符串）
-        ) as cli_process:
-            outputs = []
-            
-            for command in commands:
-                cli_process.stdin.write(f'{command}\n')
-                cli_process.stdin.flush()  # 确保命令已发送
-            
-            stdout, stderr = cli_process.communicate()
-            
-            if stderr:
-                outputs.append(f"Error: {stderr}")
-            else:
-                outputs.append(stdout)
+    client = iperf3.Client()
+    client.server_hostname = server_ip  # 设置服务器 IP
+    client.port = 5201                  # 默认端口
+    client.protocol = 'udp'             # 使用 UDP 协议
+    client.bandwidth = 1000000          # 目标带宽 1 Mbps，可根据需要调整
+    client.duration = 10                # 测试时长 10 秒
 
-            return outputs
-    except Exception as e:
-        return [f"Failed to run CLI: {e}"]
+    result = client.run()  # 运行测试
+    if result.error:
+        print(f"服务器 {server_ip} 测试失败: {result.error}")
+        return None
+    else:
+        # 从 JSON 输出中提取数据
+        sum_data = result.json['end']['sum']
+        throughput = sum_data['bytes'] * 8 / sum_data['seconds'] / 1000000  # 吞吐量 (Mbps)
+        jitter = sum_data['jitter_ms']                                      # 抖动 (ms)
+        packet_loss = (sum_data['lost_packets'] / sum_data['packets'] 
+                       if sum_data['packets'] > 0 else 0)                   # 丢包率
+        return {
+            'server_ip': server_ip,
+            'throughput': throughput,
+            'jitter': jitter,
+            'packet_loss': packet_loss
+        }
 
-def run_simple_switch_cli(thrift_port, path_id):
-    # 要发送的命令列表
-    # 0代表第一条路，1代表第二条路
-    commands = [
-        f'register_write select_path 0 {path_id}',
-        'register_read select_path 0'
-    ]
-    
-    outputs = send_cli_commands(commands, thrift_port)
-    
-    for output in outputs:
-        print(output)
+
+def generate_path_stats():
+    np.random.seed(42)  # 固定种子以复现结果
+    services = ["service1", "service2", "service3"]
+    path_stats = {}
+    for service in services:
+        path_stats[service] = []
+        # Path 0: 较高带宽，低延迟
+        path0 = [[np.random.normal(100, 5), np.random.normal(20, 2), np.random.uniform(0.01, 0.03), np.random.uniform(0.7, 0.8)]
+                for _ in range(10)]
+        # Path 1: 较低带宽，高延迟
+        path1 = [[np.random.normal(90, 5), np.random.normal(25, 3), np.random.uniform(0.03, 0.05), np.random.uniform(0.8, 0.9)]
+                for _ in range(10)]
+        path_stats[service].append(path0)
+        path_stats[service].append(path1)
+    return services, path_stats
+
+
+def update_path_stats(path_stats):
+    for service in path_stats:
+        for path in range(2):
+            last_stats = path_stats[service][path][-1]
+            new_stats = [
+                max(50, last_stats[0] + np.random.normal(0, 2)),  # 带宽波动
+                max(10, last_stats[1] + np.random.normal(0, 1)),  # 延迟波动
+                max(0, last_stats[2] + np.random.uniform(-0.01, 0.01)),  # 丢包率波动
+                min(1, max(0, last_stats[3] + np.random.uniform(-0.05, 0.05)))  # 负载波动
+            ]
+            path_stats[service][path].append(new_stats)
+            path_stats[service][path].pop(0)  # 保持 10 次历史记录
+
 
 if __name__ == "__main__":
+    # int探测开启
+    # 生成命令列表
+    int_commands = []
+    int_threads = []
+    for device, numbers in intsend_devices.items():
+        command = f"bash /home/sinet/P4/mininet/util/m {device} python3 /home/sinet/gzc/multipath_scheduling/int_send.py {numbers[0]} {numbers[1]} > /dev/null 2>&1"
+        int_commands.append(command)
+    
+    for device in intreceive_devices:
+        command = f"bash /home/sinet/P4/mininet/util/m {device} python3 /home/sinet/gzc/multipath_scheduling/int_receive.py {device} > /dev/null 2>&1"
+        int_commands.append(command)        
+
+    for command in int_commands:
+        thread = threading.Thread(target=run_command, args=(command,))
+        int_threads.append(thread)
+        thread.start()
+
+    # sudo pkill -9 -f 'int_'
+    # sudo pkill -9 -f 'iperf'
+
+    # 开启iperf流，先打180s试试，先开服务器（服务器开300s），iperf客户端打流180s
+    # 用iperf搜集数据的就是无法知道流走的路径,iperf其实也可以不知道，决策完后，直接改变方向
+
+    iperf_commands = []
+    iperf_threads = []
+
+    # 开启iperf服务器
+    for device in intreceive_devices:
+        command = f"bash /home/sinet/P4/mininet/util/m {device} python3 /home/sinet/gzc/multipath_scheduling/iperf_handle.py {device}"
+        iperf_commands.append(command)
+    
+    # 开启iperf客户端打流
+    for device, numbers in intsend_devices.items():
+        command = f"bash /home/sinet/P4/mininet/util/m {device} iperf -c {numbers[2]} -u -t 5"
+        iperf_commands.append(command)
+
+    for command in iperf_commands:
+        thread = threading.Thread(target=run_command, args=(command,))
+        iperf_threads.append(thread)
+        # thread.start()
+   
+    parser = argparse.ArgumentParser(description='选择不同的操作模式')
+    parser.add_argument('--mode', 
+                       type=str, 
+                       default='CMAB',
+                       choices=['CMAB', 'RR', 'minRTT'],
+                       help='选择操作模式: CMAB, RR 或 minRTT (默认: CMAB)')
+
+    # 解析命令行参数
+    args = parser.parse_args()
+    
+    # 根据选项执行不同的操作
+    mode = args.mode.upper()  # 转换为大写以保持一致性
+    
+    # 开始调度 
+    print(f"开始监控，每 {DATAINTERVAL} 秒读取一次数据...")
+    while True:
+        path_stats, path_delay = get_latest_data_to_path_stats()   
+        print(path_delay)         
+        if mode == 'RR':
+            pass
+        elif mode == 'MINRTT':
+            pass
+        else:
+            cmab = CMAB(services, path_stats, priorities, requirements)
+            cmab.schedule()
+            print("Final Q-Table:")
+            for i, service in enumerate(services):
+                print(f"{service}: Path 0 = {cmab.q_table[i, 0]:.3f}, Path 1 = {cmab.q_table[i, 1]:.3f}")
+        time.sleep(DATAINTERVAL)  # 暂停指定间隔时间
+
+    """
+    services, path_stats = generate_path_stats()
+    
+
+    # 模拟动态路径状态
+
+    # 运行 1000 次
+    cmab = CMAB(services, path_stats, priorities, requirements)
+    for _ in range(100):
+        cmab.schedule()
+        update_path_stats(path_stats)  # 模拟路径状态变化
+
+    # 输出最后的 Q 值表
+    print("Final Q-Table:")
+    for i, service in enumerate(services):
+        print(f"{service}: Path 0 = {cmab.q_table[i, 0]:.3f}, Path 1 = {cmab.q_table[i, 1]:.3f}")
+    
+    """
+
+
+    """
+    # iperf3 打流
+    # 开启服务器
+    iperf_server_devices = ['s1', 's2', 's3']
+    iperf_server_commands = [
+        f"bash /home/sinet/P4/mininet/util/m {device} iperf3 -s "
+        for device in iperf_server_devices        
+    ]
+
+    iperf_server_threads = []
+
+    for command in iperf_server_commands:
+        thread = threading.Thread(target=run_command, args=(command,))
+        iperf_server_threads.append(thread)
+        thread.start()
+    
+        
+
+    intreceive_commands = [
+        f"bash /home/sinet/P4/mininet/util/m {device} python3 /home/sinet/gzc/multipath_scheduling/int_receive.py"
+        for device in client_devices
+    ]    
+
     # 定义服务优先级和服务需求
     services = ['Service 1', 'Service 2', 'Service 3']
     # 加个映射
@@ -180,7 +240,8 @@ if __name__ == "__main__":
         }
     } # 路径(吞吐量, 延迟, 丢包率, 带宽负载)，通过索引来区分路径，索引为0为路径1，1为路径2
 
-    run_simple_switch_cli(thrift_port=9090,path_id=1)
+    
     # 创建CMAB实例
     # 所以输入需要优先级，需求列表，路径状态字典（但需求，优先级这些都是固定的，本质上只要路径状态）
-    cmab = CMAB(services, path_stats, priorities, requirements)
+    """
+    # cmab = CMAB(services, path_stats, priorities, requirements)

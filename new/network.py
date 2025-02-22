@@ -19,6 +19,10 @@ net.addHost('d1')
 net.addHost('d2')
 net.addHost('d3')
 
+# net.addHost('c1')
+
+
+
 """
 net.addP4RuntimeSwitch('r1', cli_input='commands/r1-commands.txt', cpu_port=255)
 net.addP4RuntimeSwitch('r2', cli_input='commands/r2-commands.txt', cpu_port=255)
@@ -53,7 +57,7 @@ net.setP4Source('r5','p4code/core_switch.p4')
 net.setP4Source('r6','p4code/core_switch.p4')
 net.setP4Source('r7','p4code/core_switch.p4')
 
-# 
+#-------------------------------------------------
 net.addLink('s1', 'r1')
 net.addLink('s2', 'r2')
 net.addLink('s3', 'r3')
@@ -79,6 +83,14 @@ net.addLink('r9', 'r7')
 net.addLink('r10', 'r6')
 net.addLink('r10', 'r7')
 
+"""
+net.addLink('r1', 'c1')
+net.addLink('r2', 'c1')
+net.addLink('r3', 'c1')
+net.addLink('r8', 'c1')
+net.addLink('r9', 'c1')
+net.addLink('r10', 'c1')
+"""
 
 """
 net.setIntfMac('h1', 's1', 'e8:61:1f:37:b6:83')
@@ -106,7 +118,10 @@ net.setDefaultRoute('h2', '10.0.3.1')
 
 net.l3()
 net.enablePcapDumpAll()
+# net.enableLogAll()
 
 # Start network
 net.startNetwork()
+
+
 

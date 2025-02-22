@@ -1,6 +1,12 @@
 table_add MyIngress.ipv4_lpm ipv4_forward 0 10.10.1.2/24 => b6:f8:df:57:6d:74 1
 table_add MyIngress.ipv4_lpm ipv4_forward 1 10.10.1.2/24 => 7a:e1:8d:52:88:d8 2
 
-
 table_add MyIngress.ipv4_lpm ipv4_forward 0 10.3.1.2/24 => 00:00:0a:03:01:02 3
 table_add MyIngress.ipv4_lpm ipv4_forward 1 10.3.1.2/24 => 00:00:0a:03:01:02 3
+
+
+table_add MyIngress.probe_exact probe_forward 63 => b6:f8:df:57:6d:74 1
+table_add MyIngress.probe_exact probe_forward 73 => 7a:e1:8d:52:88:d8 2
+
+table_add MyIngress.probe_exact probe_forward 36 => 00:00:0a:03:01:02 3
+table_add MyIngress.probe_exact probe_forward 37 => 00:00:0a:03:01:02 3
