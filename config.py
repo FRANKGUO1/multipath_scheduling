@@ -1,40 +1,45 @@
 from multiprocessing import Manager
 
-max_playback_buffer_size = 10
-nb_paths = 2
+intsend_devices = {
+    'd1': ['16', '17', '10.1.1.2'],
+    'd2': ['26', '27', '10.2.1.2'],
+    'd3': ['36', '37', '10.3.1.2']
+}
 
-# 创建manager对象，这个对象用于在多个进程间共享
-# Manager() 提供了一种机制来创建可以在多个进程之间共享和同步的对象。
+intreceive_devices = ['s1', 's2', 's3']
+
+# 服务与thrift_port映射
+service_port_mapping = {
+    'Service1': [9090, 9097],
+    'Service2': [9091, 9098],
+    'Service3': [9092, 9099]
+}
+
+# 服务需求
+requirements = {
+    "Service1": {"bandwidth": 100, "latency": 30, "loss_rate": 0.05},
+    "Service2": {"bandwidth": 90, "latency": 35, "loss_rate": 0.06},
+    "Service3": {"bandwidth": 80, "latency": 40, "loss_rate": 0.07}
+}
+
+priorities = {"Service1": 3, "Service2": 2, "Service3": 1}
+
+services = ["Service1", "Service2", "Service3"]
+
+# 读取int数据文件时间间隔
+DATAINTERVAL = 4
+
+# int发包时间间隔
+INTINTERVAL = 0.5
+
+# 创建进程间共享的字典
 manager = Manager()
+data_storage = manager.dict()
+swid_data = manager.list()
 
-# 创建一个由Manager管理的共享字典
-playback_buffer_map = Manager().dict()
-
-# 下面这个变量则是共享的变量，都是double类型，初始值为0.0
-rebuffering_ratio = Manager().Value('d', 0.0)
-playback_buffer_frame_ratio = Manager().Value('d', 0.0)
-playback_buffer_frame_count = Manager().Value('d', 0.0)
-
-history = Manager().list()
-
-exp_id = ""
-algorithm = ""
-linucb_alpha = 0.1
-lints_alpha = 0.1
-egreedy_epsilon = 0.1
-DEBUG_SEGMENTS = 200
-
-# 定义目标IP地址（两条路径）
-target_ip = "10.0.1.2"
-network_interface1 = "h2-eth0"  
-network_interface2 = "h2-eth1" 
-
-
-def init(_exp_id: str, _algorithm: str, _linucb_alpha: float, _lints_alpha: float, _egreedy_epsilon: float, _DEBUG_SEGMENTS: int):
-    global exp_id, algorithm, linucb_alpha, lints_alpha, egreedy_epsilon, DEBUG_SEGMENTS
-    exp_id = _exp_id
-    algorithm = _algorithm
-    linucb_alpha = _linucb_alpha
-    lints_alpha = _lints_alpha
-    egreedy_epsilon = _egreedy_epsilon
-    DEBUG_SEGMENTS = _DEBUG_SEGMENTS
+# ip地址与thrift_port映射
+ip_port_mapping = {
+    '10.1.1.2': 9090,
+    '10.2.1.2': 9091,
+    '10.3.1.2': 9092
+}
