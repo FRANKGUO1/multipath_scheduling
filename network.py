@@ -22,16 +22,6 @@ net.addHost('d3')
 # net.addHost('c1')
 
 
-
-"""
-net.addP4RuntimeSwitch('r1', cli_input='commands/r1-commands.txt', cpu_port=255)
-net.addP4RuntimeSwitch('r2', cli_input='commands/r2-commands.txt', cpu_port=255)
-net.addP4RuntimeSwitch('r3', cli_input='commands/r3-commands.txt', cpu_port=255)
-net.addP4RuntimeSwitch('r8', cli_input='commands/r8-commands.txt', cpu_port=255)
-net.addP4RuntimeSwitch('r9', cli_input='commands/r9-commands.txt', cpu_port=255)
-net.addP4RuntimeSwitch('r10', cli_input='commands/r10-commands.txt', cpu_port=255)
-"""
-
 net.addP4Switch('r1', cli_input='commands/r1-commands.txt')
 net.addP4Switch('r2', cli_input='commands/r2-commands.txt')
 net.addP4Switch('r3', cli_input='commands/r3-commands.txt')
@@ -43,7 +33,6 @@ net.addP4Switch('r4', cli_input='commands/r4-commands.txt')
 net.addP4Switch('r5', cli_input='commands/r5-commands.txt')
 net.addP4Switch('r6', cli_input='commands/r6-commands.txt')
 net.addP4Switch('r7', cli_input='commands/r7-commands.txt')
-
 
 net.setP4Source('r1','p4code/edge_switch.p4')
 net.setP4Source('r2','p4code/edge_switch.p4')
@@ -83,6 +72,23 @@ net.addLink('r9', 'r7')
 net.addLink('r10', 'r6')
 net.addLink('r10', 'r7')
 
+net.setBw('r4', 'r6', 50)
+net.setBw('r5', 'r7', 40)
+
+net.setDelay('r4', 'r6', 5)
+net.setDelay('r5', 'r7', 10)
+
+net.setLoss('r4', 'r6', 0.01)
+net.setLoss('r5', 'r7', 0.02)
+
+
+net.l3()
+net.enablePcapDumpAll()
+# net.enableLogAll()
+
+# Start network
+net.startNetwork()
+
 """
 net.addLink('r1', 'c1')
 net.addLink('r2', 'c1')
@@ -115,13 +121,5 @@ net.setDefaultRoute('h1', '10.0.1.1')
 net.setDefaultRoute('h2', '10.0.2.1')
 net.setDefaultRoute('h2', '10.0.3.1')
 """
-
-net.l3()
-net.enablePcapDumpAll()
-# net.enableLogAll()
-
-# Start network
-net.startNetwork()
-
 
 

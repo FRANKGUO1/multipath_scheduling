@@ -1,33 +1,13 @@
-import subprocess
 import numpy as np
-import random
 from int_send import send
-import subprocess
-import threading
 import time
 import sys
-from config import DATAINTERVAL, requirements, priorities, services, intsend_devices, intreceive_devices
-from multiprocessing import Process
+from config import DATAINTERVAL, requirements, priorities, services, service_port_mapping
 import iperf3
-import concurrent.futures
 from scheduling_algorithm import CMAB
 from switch_cli import run_simple_switch_cli
 from get_data import get_latest_data_to_path_stats
 import argparse
-
-# traceroute 可以查看到每一跳的时延
-
-# 调度函数没有问题了，然后是利用CMAB进行决策
-# CMAB算法需要处理好输入，能不能直接用globecom的，但那个的问题是路径状态在客户端上获得，路径状态可以用INT。
-# 那应用层指标呢，理论上吞可用带宽越大，清晰度越高，下载时间也需要考虑。
-# 可以这样，输入是历史路径的时延和吞吐量，以及一个传输时间（？这个得斟酌一下）
-# 先跑通一版吧，实现INT测试路径的单向时延和吞吐量以及剩余带宽（其实丢包率也可以考虑进去），服务需求则在奖励函数中实现。
-# 奖励函数包括服务的带宽，时延，丢包率需求，还有服务的优先级和路径的带宽利用率等。优先级越高的奖励越大，进而保障获取更多的资源
-
-
-def run_command(command):
-    print(f"正在运行: {command}")
-    subprocess.Popen(command, shell=True)
 
 
 def run_iperf3(server_ip):
@@ -95,77 +75,61 @@ def update_path_stats(path_stats):
             path_stats[service][path].pop(0)  # 保持 10 次历史记录
 
 
+# 找出每个Service中时延最大的key
+def find_max_delay_key(data):
+    result = {}
+    for service, delays in data.items():
+        # 获取每个key对应的时延值（取列表第一个元素）
+        min_key = min(delays.items(), key=lambda x: x[1][0])
+        result[service] = {
+            'key': min_key[0],
+            'delay': min_key[1][0]
+        }
+    return result
+
 if __name__ == "__main__":
-    # int探测开启
-    # 生成命令列表
-    int_commands = []
-    int_threads = []
-    for device, numbers in intsend_devices.items():
-        command = f"bash /home/sinet/P4/mininet/util/m {device} python3 /home/sinet/gzc/multipath_scheduling/int_send.py {numbers[0]} {numbers[1]} > /dev/null 2>&1"
-        int_commands.append(command)
-    
-    for device in intreceive_devices:
-        command = f"bash /home/sinet/P4/mininet/util/m {device} python3 /home/sinet/gzc/multipath_scheduling/int_receive.py {device} > /dev/null 2>&1"
-        int_commands.append(command)        
+    """
+    path1：50M 5ms 1%
+    path2：30M 10ms 2%
 
-    for command in int_commands:
-        thread = threading.Thread(target=run_command, args=(command,))
-        int_threads.append(thread)
-        thread.start()
-
-    # sudo pkill -9 -f 'int_'
-    # sudo pkill -9 -f 'iperf'
-
-    # 开启iperf流，先打180s试试，先开服务器（服务器开300s），iperf客户端打流180s
-    # 用iperf搜集数据的就是无法知道流走的路径,iperf其实也可以不知道，决策完后，直接改变方向
-
-    iperf_commands = []
-    iperf_threads = []
-
-    # 开启iperf服务器
-    for device in intreceive_devices:
-        command = f"bash /home/sinet/P4/mininet/util/m {device} python3 /home/sinet/gzc/multipath_scheduling/iperf_handle.py {device}"
-        iperf_commands.append(command)
-    
-    # 开启iperf客户端打流
-    for device, numbers in intsend_devices.items():
-        command = f"bash /home/sinet/P4/mininet/util/m {device} iperf -c {numbers[2]} -u -t 5"
-        iperf_commands.append(command)
-
-    for command in iperf_commands:
-        thread = threading.Thread(target=run_command, args=(command,))
-        iperf_threads.append(thread)
-        # thread.start()
-   
+    Service1 20M
+    Service2 10M
+    Service3 25M
+    """
     parser = argparse.ArgumentParser(description='选择不同的操作模式')
     parser.add_argument('--mode', 
                        type=str, 
                        default='CMAB',
                        choices=['CMAB', 'RR', 'minRTT'],
                        help='选择操作模式: CMAB, RR 或 minRTT (默认: CMAB)')
-
-    # 解析命令行参数
     args = parser.parse_args()
-    
-    # 根据选项执行不同的操作
-    mode = args.mode.upper()  # 转换为大写以保持一致性
+    mode = args.mode.upper()
     
     # 开始调度 
-    print(f"开始监控，每 {DATAINTERVAL} 秒读取一次数据...")
     while True:
         path_stats, path_delay = get_latest_data_to_path_stats()   
-        print(path_delay)         
+        # print(path_delay)         
         if mode == 'RR':
-            pass
+            for i in range(1, -1, -1):
+                for k, v in service_port_mapping.items():
+                    run_simple_switch_cli(v[0], i)
+                    run_simple_switch_cli(v[1], i)
+                time.sleep(DATAINTERVAL)  # 暂停指定间隔时间
         elif mode == 'MINRTT':
-            pass
+            # print(path_delay)
+            max_delays = find_max_delay_key(path_delay)
+            for service, info in max_delays.items():
+                # print(f"{service}: 最小时延key = {info['key']}, 时延值 = {info['delay']}")
+                run_simple_switch_cli(service_port_mapping[service][0], info['key'])
+                run_simple_switch_cli(service_port_mapping[service][1], info['key'])
+            time.sleep(DATAINTERVAL)  # 暂停指定间隔时间
         else:
             cmab = CMAB(services, path_stats, priorities, requirements)
             cmab.schedule()
             print("Final Q-Table:")
             for i, service in enumerate(services):
                 print(f"{service}: Path 0 = {cmab.q_table[i, 0]:.3f}, Path 1 = {cmab.q_table[i, 1]:.3f}")
-        time.sleep(DATAINTERVAL)  # 暂停指定间隔时间
+            time.sleep(DATAINTERVAL)  # 暂停指定间隔时间
 
     """
     services, path_stats = generate_path_stats()

@@ -20,13 +20,10 @@ def handle_pkt(pkt, device):
     # pkt.show2()
     if pkt.haslayer(probe_data):
         probe_data_layers = [l for l in expand(pkt) if l.name == 'probe_data']
-        # print("")
-        # l = len(probe_data_layers) # int数据层个数
-        # print("probe_data层数为：", l)
         total_delay = round((probe_data_layers[0].egress_cur_time - probe_data_layers[-1].ingress_cur_time) * 0.00001, 4)
         jitter = round((probe_data_layers[0].egress_cur_time - probe_data_layers[-1].ingress_cur_time) * 0.0000001, 4)
         total_throughput = round(1.0 * probe_data_layers[0].egress_byte_cnt / (probe_data_layers[0].egress_cur_time - probe_data_layers[0].egress_last_time), 4)
-        total_loss_rate = round(1.0 * (probe_data_layers[0].egress_packet_count - probe_data_layers[-1].ingress_packet_count) / probe_data_layers[0].egress_packet_count * 100, 4)
+        total_loss_rate = round(1.0 * (probe_data_layers[-1].egress_packet_count - probe_data_layers[0].ingress_packet_count) / probe_data_layers[0].egress_packet_count, 4)
         bottleneck_load = round(1.0 * probe_data_layers[-2].egress_byte_cnt / (probe_data_layers[-2].egress_cur_time - probe_data_layers[-2].egress_last_time), 4) # 还未除以瓶颈链路带宽
         swid = probe_data_layers[0].swid
 
@@ -41,7 +38,7 @@ def handle_pkt(pkt, device):
             
             # 定义 CSV 表头和数据
             headers = ['路径', 'delay_ms', 'jitter_ms', 'Throughput_MBps', 'Packet_Loss_Rate_%', '瓶颈链路负载_MBps']
-            data = [swid, total_delay, jitter, total_throughput, total_loss_rate, bottleneck_load]
+            data = [swid, total_delay, jitter, total_throughput, total_loss_rate * 100, bottleneck_load]
 
             # 以追加模式打开文件，写入数据
             with open(csv_filename, mode='a', newline='', encoding='utf-8') as f:
