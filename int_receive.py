@@ -20,11 +20,21 @@ def handle_pkt(pkt, device):
     # pkt.show2()
     if pkt.haslayer(probe_data):
         probe_data_layers = [l for l in expand(pkt) if l.name == 'probe_data']
-        total_delay = round((probe_data_layers[0].egress_cur_time - probe_data_layers[-1].ingress_cur_time) * 0.00001, 4)
-        jitter = round((probe_data_layers[0].egress_cur_time - probe_data_layers[-1].ingress_cur_time) * 0.0000001, 4)
-        total_throughput = round(1.0 * probe_data_layers[0].egress_byte_cnt / (probe_data_layers[0].egress_cur_time - probe_data_layers[0].egress_last_time), 4)
-        total_loss_rate = round(1.0 * (probe_data_layers[-1].egress_packet_count - probe_data_layers[0].ingress_packet_count) / probe_data_layers[0].egress_packet_count, 4)
-        bottleneck_load = round(1.0 * probe_data_layers[-2].egress_byte_cnt / (probe_data_layers[-2].egress_cur_time - probe_data_layers[-2].egress_last_time), 4) # 还未除以瓶颈链路带宽
+        total_delay = round((probe_data_layers[0].egress_cur_time - probe_data_layers[-1].ingress_cur_time) * 0.001, 4)
+        total_throughput = 0 if probe_data_layers[1].ingress_cur_time == probe_data_layers[1].ingress_last_time  \
+            else round(8.0 * probe_data_layers[1].ingress_byte_cnt / (probe_data_layers[1].ingress_cur_time - probe_data_layers[1].ingress_last_time), 4)
+        # total_throughput = round(1.0 * probe_data_layers[-2].egress_byte_cnt  * 0.000008 / INTINTERVAL, 2)
+        # print(f"计算{device}吞吐量：", total_throughput)
+
+        loss_packets =  abs(probe_data_layers[-2].ingress_packet_count - probe_data_layers[1].egress_packet_count)
+        print("丢包数为：", loss_packets)
+        total_packets = probe_data_layers[-2].ingress_packet_count
+        print("总包数为：", total_packets)
+        loss_delay = round((probe_data_layers[1].egress_cur_time - probe_data_layers[-2].ingress_cur_time) * 0.000001, 4)
+        total_loss_rate = round(100.0 * (loss_packets / (total_packets * loss_delay)), 4)
+
+        bottleneck_load = 0 if probe_data_layers[-2].egress_cur_time == probe_data_layers[-2].egress_last_time \
+            else round(8.0 * probe_data_layers[-2].egress_byte_cnt / (probe_data_layers[-2].egress_cur_time - probe_data_layers[-2].egress_last_time), 4)
         swid = probe_data_layers[0].swid
 
         # 计算抖动
@@ -37,8 +47,8 @@ def handle_pkt(pkt, device):
             csv_filename = f"{device}_int.csv"
             
             # 定义 CSV 表头和数据
-            headers = ['路径', 'delay_ms', 'jitter_ms', 'Throughput_MBps', 'Packet_Loss_Rate_%', '瓶颈链路负载_MBps']
-            data = [swid, total_delay, jitter, total_throughput, total_loss_rate * 100, bottleneck_load]
+            headers = ['路径', 'delay_ms', 'jitter_ms', 'Throughput_Mbps', 'Packet_Loss_Rate_%', '瓶颈链路负载_Mbps']
+            data = [swid, total_delay, jitter, total_throughput, total_loss_rate, bottleneck_load]
 
             # 以追加模式打开文件，写入数据
             with open(csv_filename, mode='a', newline='', encoding='utf-8') as f:
@@ -48,13 +58,13 @@ def handle_pkt(pkt, device):
                     writer.writerow(headers)
                 # 写入数据行
                 writer.writerow(data)
-            print(f"路径{swid} delay:{total_delay}ms  jitter:{jitter}ms  Throughput:{total_throughput}MBps  Packet_Loss_Rate:{total_loss_rate}%  瓶颈链路负载:{bottleneck_load}MBps")
+            # print(f"路径{swid} delay:{total_delay}ms  jitter:{jitter}ms  Throughput:{total_throughput}MBps  Packet_Loss_Rate:{total_loss_rate}%  瓶颈链路负载:{bottleneck_load}MBps")
 
               
 def receive(device):
     iface = get_if()
     if iface:
-        print(f"sniffing on {iface}")
+        # print(f"sniffing on {iface}")
         sys.stdout.flush()
         sniff(iface=iface, prn=lambda x: handle_pkt(x, device))
     else:

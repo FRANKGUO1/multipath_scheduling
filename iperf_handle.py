@@ -5,6 +5,7 @@ import csv
 from dataclasses import dataclass
 from typing import Optional, List
 import argparse
+from config import iperf_last_time
 
 @dataclass
 class NetworkState:
@@ -104,7 +105,7 @@ class IperfServer:
 def main(device):
     with IperfServer(f"iperf_{device}_results.csv") as server:
         # print("Monitoring for 10 seconds...")
-        states = server.monitor(190)
+        states = server.monitor(iperf_last_time+10)
         # print("查看states：", states)
         # if states:
         #     avg_jitter = sum(state.jitter for state in states) / len(states)

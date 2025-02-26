@@ -46,5 +46,5 @@ def run_simple_switch_cli(thrift_port, path_id):
     
     outputs = send_cli_commands(commands, thrift_port)
     
-    for output in outputs:
-        print(output)
+    # for output in outputs:
+    #     print(output)

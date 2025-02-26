@@ -1,6 +1,6 @@
 import threading
 import subprocess
-from config import intsend_devices, intreceive_devices
+from config import intsend_devices, intreceive_devices, iperf_last_time
 
 def run_command(command):
     print(f"正在运行: {command}")
@@ -38,7 +38,7 @@ def main():
     
     # 开启iperf客户端打流
     for device, numbers in intsend_devices.items():
-        command = f"bash /home/sinet/P4/mininet/util/m {device} iperf -c {numbers[2]} -u -b {numbers[3]} -t 180 > /dev/null 2>&1"
+        command = f"bash /home/sinet/P4/mininet/util/m {device} iperf -c {numbers[2]} -u -b {numbers[3]} -t {iperf_last_time} > /dev/null 2>&1"
         iperf_client_commands.append(command)
 
     for command in iperf_server_commands:
