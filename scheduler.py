@@ -58,7 +58,7 @@ if __name__ == "__main__":
     parser.add_argument('--mode', 
                        type=str, 
                        default='CMAB',
-                       choices=['CMAB', 'RR', 'minRTT'],
+                       choices=['CMAB', 'RR', 'minRTT', 'CMAB_ts', 'CMAB_greedy'],
                        help='选择操作模式: CMAB, RR 或 minRTT (默认: CMAB)')
     args = parser.parse_args()
     mode = args.mode.upper()
@@ -91,7 +91,7 @@ if __name__ == "__main__":
                 cmab = CMAB(priorities, requirements)
                 for service_name in services:
                     path_stats = get_latest_path_stats(service_name)
-                    # print(path_stats)
+                    # print("各路径状态", path_stats)
                     cmab.schedule(service_name, path_stats)
                     # print(f"{service_name}: Path 0 = {cmab.q_table[services.index(service_name), 0]:.3f}, Path 1 = {cmab.q_table[services.index(service_name), 1]:.3f}")
                     time.sleep(DATAINTERVAL)  # 暂停指定间隔时间

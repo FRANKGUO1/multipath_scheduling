@@ -38,7 +38,61 @@ class CMAB:
         c_t = self.k * np.sqrt(path_vars)        
         ucb_values = self.q_table[service_idx] + c_t * np.sqrt(np.log(total_counts) / (self.counts[service_idx] + 1e-5))
         return np.argmax(ucb_values)  # 选择Q值最大的路径
- 
+    
+
+    # Thompson Sampling 维护每个路径的收益分布（假设为正态分布），通过采样选择路径
+    def choose_path_ts(self, service):
+        service_idx = services.index(service)
+        total_counts = np.sum(self.counts[service_idx])
+        
+        if total_counts == 0: 
+            if ((self.priorities[service] / max(self.priorities.values())) > self.priority_threshold):
+                return 1 - DEFAULT_PATH  # 如果服务没有选择过路径，则优先选择非默认路径
+            else:
+                return np.random.choice(self.n_paths)
+        
+        # 计算每个路径的均值和方差
+        path_means = self.q_table[service_idx]  # 使用 q_table 作为均值估计
+        path_vars = [np.var(self.reward_history[service_idx * self.n_paths + p]) 
+                    if len(self.reward_history[service_idx * self.n_paths + p]) > 1 else 1.0 
+                    for p in range(self.n_paths)]
+        
+        # 从正态分布采样收益
+        sampled_rewards = [np.random.normal(mean, np.sqrt(var) / (self.counts[service_idx][p] + 1e-5)) 
+                        for mean, var, p in zip(path_means, path_vars, range(self.n_paths))]
+        
+        # 结合优先级调整采样值
+        priority = self.priorities[service] / max(self.priorities.values())
+        sampled_rewards = [r + priority * r for r in sampled_rewards]
+        
+        return np.argmax(sampled_rewards)
+
+    # Epsilon-Greedy 以概率 epsilon 随机探索，否则选择当前最优路径。
+    def choose_path_greedy(self, service):
+        service_idx = services.index(service)
+        total_counts = np.sum(self.counts[service_idx])
+        
+        if total_counts == 0: 
+            if ((self.priorities[service] / max(self.priorities.values())) > self.priority_threshold):
+                return 1 - DEFAULT_PATH  # 如果服务没有选择过路径，则优先选择非默认路径
+            else:
+                return np.random.choice(self.n_paths)
+        
+        # 计算当前收益估计
+        path_means = self.q_table[service_idx]
+        priority = self.priorities[service] / max(self.priorities.values())
+        
+        # 结合优先级调整收益估计
+        adjusted_means = path_means + priority * path_means
+        
+        # Epsilon-Greedy 策略
+        epsilon = 0.1  # 可调整的探索概率
+        if np.random.random() < epsilon:
+            return np.random.choice(self.n_paths)  # 随机探索
+        else:
+            return np.argmax(adjusted_means)  # 利用当前最优路径
+
+
     def update_q_table(self, service, path, reward):
         service_idx = services.index(service)
         self.counts[service_idx, path] += 1
@@ -98,7 +152,9 @@ class CMAB:
         return reward
 
     def schedule(self, service, path_stats):
-        path = self.choose_path(service)
+        # path = self.choose_path(service)
+        path = self.choose_path_ts(service)
+        # path = self.choose_path_greedy(service)
         print(f"{service}选择路径：", path)
         self.path_choices[service] = path
         # path选择出来后，直接下发流表
